@@ -1,6 +1,6 @@
 "use client";
 import { useState } from "react";
-import { swapTokens, estimateSwap } from "./actions";
+import { swapTokens, estimateSwapRate } from "./actions";
 import ResultBox from "@/components/ResultBox";
 import TokenSelector, { type TokenInfo } from "@/components/TokenSelector";
 import SwapSettings, { type SwapConfig } from "@/components/SwapSettings";
@@ -59,7 +59,7 @@ export default function SwapPage() {
             </div>
           </div>
           <div className="grid grid-cols-2 gap-3">
-            <button type="button" disabled={estimating} onClick={async () => { setEstimating(true); setEstimate(null); setEstimate(await estimateSwap(fd(getAmt()))); setEstimating(false); }}
+            <button type="button" disabled={estimating} onClick={async () => { setEstimating(true); setEstimate(null); setEstimate(await estimateSwapRate(fd(getAmt()))); setEstimating(false); }}
               className="py-3 rounded-xl font-semibold text-sm border border-emerald-700 text-emerald-300 hover:bg-emerald-900/30 transition-colors disabled:opacity-40">
               {estimating ? "⏳ Estimating..." : "📊 Get Rate"}
             </button>
