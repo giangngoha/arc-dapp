@@ -15,8 +15,8 @@ function parseAbiStr(hex:string){ try{ const r=hex.slice(2); if(r.length<128)ret
 
 async function switchToArc(){
   const eth=(window as any).ethereum; if(!eth)throw new Error("No wallet.");
-  const hex="0x4cef52";
-  let cur:string|undefined; try{cur=await eth.request({method:"eth_chainId"});}catch{}
+  const hex="0x4cef52"; let cur:string|undefined;
+  try{cur=await eth.request({method:"eth_chainId"});}catch{}
   if(cur?.toLowerCase()===hex)return;
   try{await eth.request({method:"wallet_switchEthereumChain",params:[{chainId:hex}]});}
   catch(e:any){ if(e.code===4902) await eth.request({method:"wallet_addEthereumChain",params:[{chainId:hex,chainName:"Arc Network Testnet",nativeCurrency:{name:"USDC",symbol:"USDC",decimals:18},rpcUrls:["https://rpc.testnet.arc.network"],blockExplorerUrls:[ARC_EXPLORER]}]}); else throw e; }
@@ -31,31 +31,32 @@ async function waitTx(hash:string,maxWait=60000):Promise<boolean>{
 
 export default function SendPage(){
   const { wallet, openModal, refreshBalances } = useWallet();
-  const [tab,      setTab]     = useState<"builtin"|"custom">("builtin");
+  // Token selection — unified (builtin + custom in one dropdown)
   const [selSym,   setSelSym]  = useState("USDC");
   const [custAddr, setCustAddr]= useState("");
   const [custInfo, setCustInfo]= useState<{sym:string;dec:number}|null>(null);
   const [fetching, setFetching]= useState(false);
   const [custBal,  setCustBal] = useState(0);
+  const [showDrop, setShowDrop]= useState(false);
   const [recipient,setRecip]   = useState("");
   const [amount,   setAmt]     = useState("");
   const [sending,  setSend]    = useState(false);
   const [status,   setStat]    = useState("");
   const [lastTx,   setTx]      = useState<{hash:string;sym:string;amt:string;to:string}|null>(null);
 
-  const builtinTok = BUILTIN.find(t=>t.sym===selSym)!;
-  const activeSym  = tab==="custom"&&custInfo ? custInfo.sym : selSym;
-  const activeDec  = tab==="custom"&&custInfo ? custInfo.dec : builtinTok.dec;
-  const activeAddr = tab==="custom" ? custAddr : builtinTok.addr;
-  const activeBg   = tab==="custom" ? "#6b7280" : builtinTok.bg;
-  const builtinBal = wallet.connected ? getBal(wallet.balances,selSym) : 0;
-  const bal        = tab==="custom" ? custBal : builtinBal;
+  const isCustom   = selSym === "CUSTOM";
+  const builtinTok = BUILTIN.find(t=>t.sym===selSym);
+  const activeSym  = isCustom&&custInfo ? custInfo.sym : selSym;
+  const activeDec  = isCustom&&custInfo ? custInfo.dec : (builtinTok?.dec??6);
+  const activeAddr = isCustom ? custAddr : (builtinTok?.addr??"");
+  const activeBg   = isCustom ? "#6b7280" : (builtinTok?.bg??"#888");
+  const builtinBal = wallet.connected&&builtinTok ? getBal(wallet.balances,selSym) : 0;
+  const bal        = isCustom ? custBal : builtinBal;
   const fmtBal     = activeDec>=8 ? bal.toFixed(8) : bal.toFixed(2);
   const amtN       = parseFloat(amount)||0;
   const validAddr  = isAddr(recipient);
-  const canSend    = wallet.connected&&amtN>0&&validAddr&&!sending&&(tab==="builtin"||(tab==="custom"&&!!custInfo));
+  const canSend    = wallet.connected&&amtN>0&&validAddr&&!sending&&(!isCustom||(isCustom&&!!custInfo&&isAddr(custAddr)));
 
-  // Fetch custom token info
   useEffect(()=>{
     if(!custAddr||!isAddr(custAddr)){setCustInfo(null);return;}
     const eth=(window as any).ethereum; if(!eth)return;
@@ -64,7 +65,7 @@ export default function SendPage(){
     Promise.all([
       eth.request({method:"eth_call",params:[{to:custAddr,data:"0x95d89b41"},"latest"]}),
       eth.request({method:"eth_call",params:[{to:custAddr,data:"0x313ce567"},"latest"]}),
-      wallet.connected ? eth.request({method:"eth_call",params:[{to:custAddr,data:"0x70a08231"+pad},"latest"]}) : Promise.resolve("0x"),
+      wallet.connected?eth.request({method:"eth_call",params:[{to:custAddr,data:"0x70a08231"+pad},"latest"]}):Promise.resolve("0x"),
     ]).then(([symHex,decHex,balHex]:[string,string,string])=>{
       const sym=parseAbiStr(symHex)||custAddr.slice(0,6)+"…";
       const dec=decHex&&decHex!=="0x"?parseInt(decHex,16):18;
@@ -87,7 +88,7 @@ export default function SendPage(){
       setStat("Waiting for confirmation…");
       const ok=await waitTx(txHash);
       setTx({hash:txHash,sym:activeSym,amt:amount,to:recipient.trim()});
-      if(ok){ showToast(true,"Send Confirmed ✓",`${amount} ${activeSym} sent`); setAmt(""); setRecip(""); if(tab==="builtin")await refreshBalances(); }
+      if(ok){ showToast(true,"Send Confirmed ✓",`${amount} ${activeSym} sent`); setAmt(""); setRecip(""); if(!isCustom)await refreshBalances(); }
       else showToast(false,"Send Failed","Transaction reverted.");
     }catch(err:any){
       const msg=err?.message||String(err);
@@ -97,72 +98,85 @@ export default function SendPage(){
   }
 
   return (
-    <>
     <div className="fade-in" style={{maxWidth:480,margin:"0 auto",padding:"20px 24px"}}>
-      <div style={{marginBottom:24}}><h1 style={{fontSize:26,fontWeight:800,letterSpacing:-0.5,marginBottom:4}}>Send Tokens</h1><p style={{fontSize:13,color:"var(--text2)"}}>Transfer ERC-20 tokens on Arc Testnet</p></div>
+      <div style={{marginBottom:24}}><h1 style={{fontSize:26,fontWeight:800,letterSpacing:-0.5}}>Send Tokens</h1></div>
       <div style={{background:"var(--bg1)",border:"1px solid var(--border)",borderRadius:20,padding:22}}>
-        {/* Tab */}
-        <div style={{display:"flex",background:"var(--bg2)",borderRadius:12,padding:4,gap:3,marginBottom:18}}>
-          {(["builtin","custom"] as const).map(t=>(
-            <button key={t} onClick={()=>setTab(t)} style={{flex:1,padding:"9px 0",borderRadius:9,border:"none",background:tab===t?"var(--bg3)":"transparent",color:tab===t?"var(--text0)":"var(--text2)",fontFamily:"var(--mono)",fontSize:13,fontWeight:700,cursor:"pointer",borderBottom:tab===t?"1px solid var(--cyan)":"1px solid transparent",transition:"all 0.2s"}}>
-              {t==="builtin"?"Built-in Tokens":"Custom Token"}
-            </button>
-          ))}
-        </div>
 
-        {/* Built-in selector */}
-        {tab==="builtin"&&(
-          <div style={{marginBottom:18}}>
-            <div style={{display:"flex",gap:8,marginBottom:8}}>
-              {BUILTIN.map(t=>(
-                <button key={t.sym} onClick={()=>setSelSym(t.sym)} style={{flex:1,padding:"10px 6px",borderRadius:12,border:"1px solid",borderColor:selSym===t.sym?t.bg+"80":"var(--border)",background:selSym===t.sym?t.bg+"18":"var(--bg2)",cursor:"pointer",transition:"all 0.2s",display:"flex",flexDirection:"column",alignItems:"center",gap:6}}>
-                  <div style={{width:30,height:30,borderRadius:"50%",background:t.bg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:700,color:"#fff"}}>{t.sym==="cirBTC"?"₿":t.sym.slice(0,2)}</div>
-                  <span style={{fontSize:12,fontWeight:700,color:selSym===t.sym?"var(--cyan)":"var(--text1)"}}>{t.sym}</span>
-                </button>
-              ))}
-            </div>
-            {wallet.connected&&<p style={{fontSize:11,color:"var(--text2)",fontFamily:"var(--mono)",textAlign:"right"}}>Balance: <span style={{color:"var(--cyan)",fontWeight:600,cursor:"pointer"}} onClick={()=>setAmt(fmtBal)}>{fmtBal} {selSym} (tap to MAX)</span></p>}
-          </div>
-        )}
-
-        {/* Custom token */}
-        {tab==="custom"&&(
-          <div style={{marginBottom:18}}>
-            <p style={{fontSize:11,fontWeight:700,color:"var(--text2)",textTransform:"uppercase",letterSpacing:"0.8px",fontFamily:"var(--mono)",marginBottom:8}}>Contract Address (Arc Testnet)</p>
-            <div style={{position:"relative"}}>
-              <input placeholder="0x… (ERC-20 contract address)" value={custAddr} onChange={e=>setCustAddr(e.target.value)} style={{width:"100%",background:"var(--bg2)",borderRadius:12,outline:"none",border:`1px solid ${custInfo?"rgba(0,200,150,0.4)":custAddr&&isAddr(custAddr)?"var(--border2)":custAddr?"rgba(224,65,90,0.4)":"var(--border)"}`,padding:"12px 14px",color:"var(--text0)",fontFamily:"var(--mono)",fontSize:13}}/>
-              {fetching&&<span style={{position:"absolute",right:12,top:"50%",transform:"translateY(-50%)"}} className="spinner"/>}
-            </div>
-            {custAddr&&!isAddr(custAddr)&&<p style={{color:"var(--red)",fontSize:11,marginTop:4,fontFamily:"var(--mono)"}}>⚠ Invalid address format</p>}
-            {custInfo&&<div style={{display:"flex",alignItems:"center",gap:8,marginTop:8,padding:"8px 12px",background:"rgba(0,200,150,0.06)",border:"1px solid rgba(0,200,150,0.2)",borderRadius:8}}><div style={{width:24,height:24,borderRadius:"50%",background:"#6b7280",display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:700,color:"#fff"}}>{custInfo.sym.slice(0,2)}</div><span style={{fontSize:13,fontWeight:700,color:"var(--green)"}}>{custInfo.sym}</span><span style={{fontSize:11,color:"var(--text2)",fontFamily:"var(--mono)"}}>{custInfo.dec} decimals</span>{wallet.connected&&<span style={{marginLeft:"auto",fontSize:12,color:"var(--text1)",fontFamily:"var(--mono)",cursor:"pointer"}} onClick={()=>setAmt(custBal.toFixed(custInfo.dec))}>Bal: {custBal.toFixed(4)}</span>}</div>}
-            {isAddr(custAddr)&&!fetching&&!custInfo&&<p style={{color:"var(--orange)",fontSize:11,marginTop:4,fontFamily:"var(--mono)"}}>⚠ Could not detect token. Ensure it is deployed on Arc Testnet (0x4cef52).</p>}
-          </div>
-        )}
-
-        {/* Amount */}
+        {/* Amount + Token dropdown */}
         <div style={{marginBottom:18}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
             <p style={{fontSize:11,fontWeight:700,color:"var(--text2)",textTransform:"uppercase",letterSpacing:"0.8px",fontFamily:"var(--mono)"}}>Amount</p>
-            {wallet.connected&&tab==="builtin"&&<span style={{fontSize:11,color:"var(--cyan)",fontFamily:"var(--mono)",fontWeight:600,cursor:"pointer"}} onClick={()=>setAmt(fmtBal)}>MAX: {fmtBal}</span>}
+            {wallet.connected&&!isCustom&&<span style={{fontSize:11,color:"var(--cyan)",fontFamily:"var(--mono)",fontWeight:600,cursor:"pointer"}} onClick={()=>setAmt(fmtBal)}>MAX: {fmtBal}</span>}
+            {wallet.connected&&isCustom&&custInfo&&<span style={{fontSize:11,color:"var(--cyan)",fontFamily:"var(--mono)",fontWeight:600,cursor:"pointer"}} onClick={()=>setAmt(custBal.toFixed(custInfo.dec))}>MAX: {custBal.toFixed(4)}</span>}
           </div>
           <div className="token-box">
             <div style={{display:"flex",alignItems:"center",gap:10}}>
-              <input type="number" placeholder="0.00" step={activeDec>=8?"0.00000001":"0.01"} value={amount} onChange={e=>setAmt(e.target.value)} style={{flex:1,background:"none",border:"none",outline:"none",fontSize:28,fontWeight:700,color:"var(--text0)",fontFamily:"var(--mono)",minWidth:0}}/>
-              <div style={{display:"flex",alignItems:"center",gap:7,background:"var(--bg3)",border:"1px solid var(--border2)",borderRadius:50,padding:"7px 12px 7px 8px",flexShrink:0}}>
-                <div style={{width:22,height:22,borderRadius:"50%",background:activeBg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:700,color:"#fff"}}>{activeSym==="cirBTC"?"₿":activeSym.slice(0,2)}</div>
-                <span style={{fontSize:13,fontWeight:700}}>{activeSym}</span>
+              <input type="number" placeholder="0.00" step={activeDec>=8?"0.00000001":"0.01"} value={amount} onChange={e=>setAmt(e.target.value)}
+                style={{flex:1,background:"none",border:"none",outline:"none",fontSize:28,fontWeight:700,color:"var(--text0)",fontFamily:"var(--mono)",minWidth:0}}/>
+
+              {/* Token dropdown pill */}
+              <div style={{position:"relative",flexShrink:0}}>
+                <div className="token-pill" onClick={()=>setShowDrop(d=>!d)}>
+                  <div className="token-circle" style={{background:activeBg}}>{activeSym==="cirBTC"?"₿":activeSym.slice(0,2)}</div>
+                  <span className="token-sym-txt">{activeSym==="CUSTOM"?"Select…":activeSym}</span>
+                  <span className="chev">▾</span>
+                </div>
+                {showDrop&&(
+                  <div style={{position:"absolute",right:0,top:"calc(100% + 6px)",background:"var(--bg2)",border:"1px solid var(--border2)",borderRadius:14,padding:8,zIndex:200,minWidth:200,boxShadow:"0 12px 40px rgba(0,0,0,0.5)"}}>
+                    {/* Built-in tokens */}
+                    {BUILTIN.map(t=>(
+                      <button key={t.sym} onClick={()=>{setSelSym(t.sym);setShowDrop(false);setCustAddr("");setCustInfo(null);}} style={{width:"100%",display:"flex",alignItems:"center",gap:10,padding:"9px 10px",borderRadius:10,border:"none",background:selSym===t.sym?"var(--bg3)":"none",cursor:"pointer",fontFamily:"var(--mono)",transition:"background 0.15s"}}
+                        onMouseEnter={e=>(e.currentTarget.style.background="var(--bg3)")} onMouseLeave={e=>(e.currentTarget.style.background=selSym===t.sym?"var(--bg3)":"none")}>
+                        <div style={{width:28,height:28,borderRadius:"50%",background:t.bg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:700,color:"#fff",flexShrink:0}}>{t.sym==="cirBTC"?"₿":t.sym.slice(0,2)}</div>
+                        <div style={{textAlign:"left"}}><p style={{fontSize:13,fontWeight:700,color:"var(--text0)"}}>{t.sym}</p><p style={{fontSize:11,color:"var(--text2)"}}>{t.name}</p></div>
+                        {wallet.connected&&<span style={{marginLeft:"auto",fontSize:11,color:"var(--text1)",fontFamily:"var(--mono)"}}>{getBal(wallet.balances,t.sym).toFixed(t.dec>=8?8:2)}</span>}
+                      </button>
+                    ))}
+                    {/* Divider + custom */}
+                    <hr style={{border:"none",borderTop:"1px solid var(--border)",margin:"6px 0"}}/>
+                    <button onClick={()=>{setSelSym("CUSTOM");setShowDrop(false);}} style={{width:"100%",display:"flex",alignItems:"center",gap:10,padding:"9px 10px",borderRadius:10,border:"none",background:selSym==="CUSTOM"?"var(--bg3)":"none",cursor:"pointer",fontFamily:"var(--mono)"}}
+                      onMouseEnter={e=>(e.currentTarget.style.background="var(--bg3)")} onMouseLeave={e=>(e.currentTarget.style.background=selSym==="CUSTOM"?"var(--bg3)":"none")}>
+                      <div style={{width:28,height:28,borderRadius:"50%",background:"var(--bg4)",border:"1px dashed var(--border2)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,color:"var(--text2)",flexShrink:0}}>+</div>
+                      <div style={{textAlign:"left"}}><p style={{fontSize:13,fontWeight:700,color:"var(--text0)"}}>Custom Token</p><p style={{fontSize:11,color:"var(--text2)"}}>Paste contract address</p></div>
+                    </button>
+                  </div>
+                )}
+                {showDrop&&<div style={{position:"fixed",inset:0,zIndex:100}} onClick={()=>setShowDrop(false)}/>}
               </div>
             </div>
-            <div style={{fontSize:12,color:"var(--text2)",marginTop:8,fontFamily:"var(--mono)"}}>{amtN>0?`≈ ${activeSym==="cirBTC"?`$${(amtN*67450).toFixed(2)}`:`$${amtN.toFixed(2)}`} USD`:"$0.00"}</div>
+            <div style={{fontSize:12,color:"var(--text2)",marginTop:8,fontFamily:"var(--mono)"}}>{amtN>0?`≈ ${activeSym==="cirBTC"?`$${(amtN*67450).toFixed(2)}`:activeSym==="USDC"||activeSym==="EURC"?`$${amtN.toFixed(2)}`:`${amtN} tokens`}`:"$0.00"}</div>
           </div>
         </div>
+
+        {/* Custom contract input — shown only when CUSTOM selected */}
+        {selSym==="CUSTOM"&&(
+          <div style={{marginBottom:18}}>
+            <p style={{fontSize:11,fontWeight:700,color:"var(--text2)",textTransform:"uppercase",letterSpacing:"0.8px",fontFamily:"var(--mono)",marginBottom:8}}>Contract Address</p>
+            <div style={{position:"relative"}}>
+              <input placeholder="0x… (ERC-20 on Arc Testnet)" value={custAddr} onChange={e=>setCustAddr(e.target.value)}
+                style={{width:"100%",background:"var(--bg2)",borderRadius:12,outline:"none",border:`1px solid ${custInfo?"rgba(0,200,150,0.4)":custAddr&&isAddr(custAddr)?"var(--border2)":custAddr?"rgba(224,65,90,0.4)":"var(--border)"}`,padding:"12px 14px",color:"var(--text0)",fontFamily:"var(--mono)",fontSize:13}}/>
+              {fetching&&<span style={{position:"absolute",right:12,top:"50%",transform:"translateY(-50%)"}} className="spinner"/>}
+            </div>
+            {custAddr&&!isAddr(custAddr)&&<p style={{color:"var(--red)",fontSize:11,marginTop:4,fontFamily:"var(--mono)"}}>⚠ Invalid address format</p>}
+            {custInfo&&(
+              <div style={{display:"flex",alignItems:"center",gap:8,marginTop:8,padding:"8px 12px",background:"rgba(0,200,150,0.06)",border:"1px solid rgba(0,200,150,0.2)",borderRadius:8}}>
+                <div style={{width:24,height:24,borderRadius:"50%",background:"#6b7280",display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:700,color:"#fff"}}>{custInfo.sym.slice(0,2)}</div>
+                <span style={{fontSize:13,fontWeight:700,color:"var(--green)"}}>{custInfo.sym}</span>
+                <span style={{fontSize:11,color:"var(--text2)",fontFamily:"var(--mono)"}}>{custInfo.dec} decimals</span>
+                {wallet.connected&&<span style={{marginLeft:"auto",fontSize:12,color:"var(--text1)",fontFamily:"var(--mono)"}}>Bal: {custBal.toFixed(4)}</span>}
+              </div>
+            )}
+            {isAddr(custAddr)&&!fetching&&!custInfo&&<p style={{color:"var(--orange)",fontSize:11,marginTop:4,fontFamily:"var(--mono)"}}>⚠ Token not found on Arc Testnet (0x4cef52)</p>}
+          </div>
+        )}
 
         {/* Recipient */}
         <div style={{marginBottom:20}}>
           <p style={{fontSize:11,fontWeight:700,color:"var(--text2)",textTransform:"uppercase",letterSpacing:"0.8px",fontFamily:"var(--mono)",marginBottom:8}}>Recipient Address</p>
-          <input type="text" placeholder="0x…" value={recipient} onChange={e=>setRecip(e.target.value)} style={{width:"100%",background:"var(--bg2)",borderRadius:12,outline:"none",border:`1px solid ${recipient&&!validAddr?"var(--red)":recipient&&validAddr?"rgba(0,200,150,0.4)":"var(--border)"}`,padding:"13px 16px",color:"var(--text0)",fontFamily:"var(--mono)",fontSize:13,transition:"border-color 0.2s"}}/>
+          <input type="text" placeholder="0x…" value={recipient} onChange={e=>setRecip(e.target.value)}
+            style={{width:"100%",background:"var(--bg2)",borderRadius:12,outline:"none",border:`1px solid ${recipient&&!validAddr?"var(--red)":recipient&&validAddr?"rgba(0,200,150,0.4)":"var(--border)"}`,padding:"13px 16px",color:"var(--text0)",fontFamily:"var(--mono)",fontSize:13,transition:"border-color 0.2s"}}/>
           {recipient&&validAddr&&<p style={{color:"var(--green)",fontSize:11,marginTop:4,fontFamily:"var(--mono)"}}>✓ Valid address</p>}
-          {recipient&&!validAddr&&<p style={{color:"var(--red)",fontSize:11,marginTop:4,fontFamily:"var(--mono)"}}>⚠ Invalid address format</p>}
+          {recipient&&!validAddr&&<p style={{color:"var(--red)",fontSize:11,marginTop:4,fontFamily:"var(--mono)"}}>⚠ Invalid address</p>}
         </div>
 
         {/* Summary */}
@@ -178,7 +192,7 @@ export default function SendPage(){
 
         <button onClick={handleSend} disabled={sending||(!wallet.connected?false:!canSend)} style={{width:"100%",padding:15,borderRadius:12,fontFamily:"var(--mono)",fontSize:15,fontWeight:700,cursor:sending||(!wallet.connected?false:!canSend)?"not-allowed":"pointer",transition:"all 0.2s",display:"flex",alignItems:"center",justifyContent:"center",gap:8,...(!wallet.connected?{background:"rgba(0,229,255,0.08)",border:"1px solid rgba(0,229,255,0.25)",color:"var(--cyan)"}:!canSend||sending?{background:"var(--bg3)",border:"1px solid var(--border)",color:"var(--text2)"}:{background:"linear-gradient(90deg,#00b4d8,#0077b6)",border:"none",color:"#fff"})}}>
           {sending&&<span className="spinner"/>}
-          {!wallet.connected?"Connect Wallet":sending?"Sending…":tab==="custom"&&!custInfo?"Enter valid token address":!amtN||!validAddr?"Enter amount & recipient":`Send ${amount} ${activeSym} →`}
+          {!wallet.connected?"Connect Wallet":sending?"Sending…":selSym==="CUSTOM"&&!custInfo?"Enter valid contract address":!amtN||!validAddr?"Enter amount & recipient":`Send ${amount} ${activeSym} →`}
         </button>
       </div>
 
@@ -192,6 +206,5 @@ export default function SendPage(){
         </div>
       )}
     </div>
-    </>
   );
 }

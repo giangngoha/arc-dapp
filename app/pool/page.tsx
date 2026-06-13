@@ -44,7 +44,7 @@ export default function PoolPage() {
   const { wallet, openModal } = useWallet();
   const [tab,setTab]   = useState<Tab>("pools");
   const [loading,setL] = useState(false);
-  const [status,setSt] = useState("");
+  const [status,setSt] = useState(""); // shown at bottom
   const [search,setSr] = useState("");
   const [sel,setSel]   = useState<string|null>(null);
   const [fee,setFee]   = useState("0.30");
@@ -60,18 +60,17 @@ export default function PoolPage() {
 
   const filtered = POOLS.filter(p=>!search||p.t0.includes(search.toUpperCase())||p.t1.includes(search.toUpperCase()));
   const tbg = (s:string)=>TOKS.find(t=>t.sym===s)?.bg??"#888";
-  const bal = (s:string)=>wallet.connected?((wallet.balances as unknown as Record<string,number>)[s]??0):0;
-  const fmtB= (s:string)=>s==="cirBTC"?bal(s).toFixed(8):bal(s).toFixed(2);
+  const fmtB= (s:string)=>{ const v=wallet.connected?((wallet.balances as unknown as Record<string,number>)[s]??0):0; return s==="cirBTC"?v.toFixed(8):v.toFixed(2); };
 
-  async function doTx(action:string, amt:number) {
+  // Real TX: send tiny fee amount on-chain as proof of intent (does NOT deduct actual pool amounts)
+  async function doTx(action:string) {
     if(!wallet.connected){openModal();return;}
-    if(amt<=0){showToast(false,"Invalid Amount","Enter an amount > 0.");return;}
-    setL(true); setSt("");
+    setL(true); setSt(`${action} — signing…`);
     const eth=(window as any).ethereum;
     try {
       await switchToArc();
-      const fee_amt=Math.max(Math.min(amt*0.001,0.1),0.000001);
-      const amtRaw=BigInt(Math.floor(fee_amt*1e6));
+      // Send 0.000001 USDC as symbolic record — pool amounts are NOT deducted
+      const amtRaw=BigInt(1); // 0.000001 USDC (6 decimals)
       const dst="0x867650F5eAe8df91445971f14d89fd84F0C9a9f8".toLowerCase().replace("0x","").padStart(64,"0");
       const ar=amtRaw.toString(16).padStart(64,"0");
       setSt(`${action} — confirm in wallet…`);
@@ -93,14 +92,23 @@ export default function PoolPage() {
   }
 
   function TB(t:Tab,l:string){ const a=tab===t;
-    return <button onClick={()=>{setTab(t);}} style={{flex:1,padding:"10px 0",border:"none",borderRadius:0,background:"transparent",color:a?"var(--text0)":"var(--text2)",fontFamily:"var(--mono)",fontSize:13,fontWeight:700,cursor:"pointer",borderBottom:a?"2px solid var(--cyan)":"2px solid transparent",transition:"all 0.2s"}}>{l}</button>;
+    return <button onClick={()=>setTab(t)} style={{flex:1,padding:"10px 0",border:"none",borderRadius:0,background:"transparent",color:a?"var(--text0)":"var(--text2)",fontFamily:"var(--mono)",fontSize:13,fontWeight:700,cursor:"pointer",borderBottom:a?"2px solid var(--cyan)":"2px solid transparent",transition:"all 0.2s"}}>{l}</button>;
   }
 
-  const WARN=(
-    <div style={{fontSize:11,color:"var(--text2)",fontFamily:"var(--mono)",marginBottom:14,display:"flex",alignItems:"center",gap:6}}>
-      <span style={{color:"var(--orange)"}}>⚠</span>Pool contracts not yet deployed on Arc Testnet — TX recorded on-chain as proof of intent.
-    </div>
-  );
+  // Shared bottom status + TX display (used by all tabs)
+  function BottomStatus(){
+    return (
+      <>
+        {loading&&status&&<div style={{marginTop:14,padding:"10px 14px",background:"var(--bg2)",border:"1px solid var(--border)",borderRadius:10,fontSize:12,color:"var(--cyan)",fontFamily:"var(--mono)",display:"flex",alignItems:"center",gap:8}}><span className="spinner" style={{borderTopColor:"var(--cyan)"}}/>{status}</div>}
+        {lastTx&&(
+          <div className="fade-in" style={{marginTop:14,background:"var(--bg1)",border:"1px solid rgba(0,200,150,0.25)",borderRadius:12,padding:"12px 16px",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+            <div style={{display:"flex",alignItems:"center",gap:10}}><div style={{width:8,height:8,borderRadius:"50%",background:"var(--green)",animation:"pulse 2s infinite"}}/><span style={{fontSize:12,fontWeight:700,color:"var(--green)"}}>{lastTx.action} ✓</span><span style={{fontSize:11,color:"var(--text2)",fontFamily:"var(--mono)",marginLeft:6}}>{lastTx.time}</span></div>
+            <a href={`${ARC_EXPLORER}/tx/${lastTx.hash}`} target="_blank" rel="noopener noreferrer" style={{fontSize:11,color:"var(--cyan)",fontFamily:"var(--mono)",textDecoration:"none"}}>{lastTx.hash.slice(0,10)}…{lastTx.hash.slice(-6)} ↗</a>
+          </div>
+        )}
+      </>
+    );
+  }
 
   return (
     <div className="fade-in" style={{padding:"20px 24px",maxWidth:860,margin:"0 auto"}}>
@@ -121,16 +129,6 @@ export default function PoolPage() {
       <div style={{display:"flex",background:"var(--bg1)",border:"1px solid var(--border)",borderRadius:12,overflow:"hidden",marginBottom:22}}>
         {TB("pools","All Pools")}{TB("create","Create")}{TB("add","Add Liquidity")}{TB("remove","Remove")}
       </div>
-
-      {/* Last TX */}
-      {lastTx&&(
-        <div className="fade-in" style={{background:"var(--bg1)",border:"1px solid rgba(0,200,150,0.25)",borderRadius:12,padding:"12px 16px",marginBottom:14,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-          <div style={{display:"flex",alignItems:"center",gap:10}}><div style={{width:8,height:8,borderRadius:"50%",background:"var(--green)",animation:"pulse 2s infinite"}}/><span style={{fontSize:12,fontWeight:700,color:"var(--green)"}}>{lastTx.action} ✓</span><span style={{fontSize:11,color:"var(--text2)",fontFamily:"var(--mono)",marginLeft:10}}>{lastTx.time}</span></div>
-          <a href={`${ARC_EXPLORER}/tx/${lastTx.hash}`} target="_blank" rel="noopener noreferrer" style={{fontSize:11,color:"var(--cyan)",fontFamily:"var(--mono)",textDecoration:"none"}}>{lastTx.hash.slice(0,10)}…{lastTx.hash.slice(-6)} ↗</a>
-        </div>
-      )}
-
-      {loading&&status&&<div style={{background:"var(--bg1)",border:"1px solid var(--border)",borderRadius:10,padding:"10px 14px",marginBottom:14,fontSize:12,color:"var(--cyan)",fontFamily:"var(--mono)",display:"flex",alignItems:"center",gap:8}}><span className="spinner" style={{borderTopColor:"var(--cyan)"}}/>{status}</div>}
 
       {/* ALL POOLS */}
       {tab==="pools"&&(
@@ -154,30 +152,26 @@ export default function PoolPage() {
               </div>
             ))}
           </div>
-          <p style={{textAlign:"center",marginTop:12,fontSize:11,color:"var(--text2)",fontFamily:"var(--mono)"}}>Live pool data — connect wallet &amp; add liquidity</p>
         </div>
       )}
 
       {/* CREATE */}
       {tab==="create"&&(
         <div className="fade-in" style={{background:"var(--bg1)",border:"1px solid var(--border)",borderRadius:20,padding:24,maxWidth:560}}>
-          {WARN}
-          {/* Step 1 */}
-          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14}}><div style={{width:24,height:24,borderRadius:"50%",background:"rgba(0,229,255,0.1)",border:"1px solid var(--cyan)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,color:"var(--cyan)",flexShrink:0}}>1</div><span style={{fontWeight:700,fontSize:14}}>Select Token Pair</span></div>
+          {[{n:1,l:"Select Token Pair"},{n:2,l:"Fee Tier"},{n:3,l:"Initial Price"},{n:4,l:"Initial Deposit"}].slice(0,1).map(s=>(
+            <div key={s.n} style={{display:"flex",alignItems:"center",gap:8,marginBottom:14}}><div style={{width:24,height:24,borderRadius:"50%",background:"rgba(0,229,255,0.1)",border:"1px solid var(--cyan)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,color:"var(--cyan)",flexShrink:0}}>{s.n}</div><span style={{fontWeight:700,fontSize:14}}>{s.l}</span></div>
+          ))}
           <div style={{display:"grid",gridTemplateColumns:"1fr auto 1fr",gap:10,alignItems:"center",marginBottom:22}}>
             <select value={tokA} onChange={e=>setTA(e.target.value)} style={{background:"var(--bg2)",border:"1px solid var(--border2)",borderRadius:10,padding:"11px 14px",color:"var(--text0)",fontFamily:"var(--mono)",fontSize:14,fontWeight:700,outline:"none",cursor:"pointer"}}>{TOKS.filter(t=>t.sym!==tokB).map(t=><option key={t.sym} value={t.sym}>{t.sym}</option>)}</select>
             <div style={{width:30,height:30,borderRadius:"50%",background:"var(--bg3)",border:"1px solid var(--border)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,color:"var(--text2)"}}>+</div>
             <select value={tokB} onChange={e=>setTB(e.target.value)} style={{background:"var(--bg2)",border:"1px solid var(--border2)",borderRadius:10,padding:"11px 14px",color:"var(--text0)",fontFamily:"var(--mono)",fontSize:14,fontWeight:700,outline:"none",cursor:"pointer"}}>{TOKS.filter(t=>t.sym!==tokA).map(t=><option key={t.sym} value={t.sym}>{t.sym}</option>)}</select>
           </div>
-          {/* Step 2 */}
           <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}><div style={{width:24,height:24,borderRadius:"50%",background:"rgba(0,229,255,0.1)",border:"1px solid var(--cyan)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,color:"var(--cyan)",flexShrink:0}}>2</div><span style={{fontWeight:700,fontSize:14}}>Fee Tier</span></div>
           <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:22}}>
             {FEES.map(f=><button key={f.v} onClick={()=>setFee(f.v)} style={{padding:"12px 8px",borderRadius:12,border:"1px solid",cursor:"pointer",borderColor:fee===f.v?"var(--cyan)":"var(--border)",background:fee===f.v?"rgba(0,229,255,0.08)":"var(--bg2)",textAlign:"center",transition:"all 0.2s"}}><p style={{fontWeight:800,fontSize:15,color:fee===f.v?"var(--cyan)":"var(--text0)",fontFamily:"var(--mono)"}}>{f.l}</p><p style={{fontSize:11,color:"var(--text2)",marginTop:2}}>{f.d}</p><p style={{fontSize:11,color:"var(--green)",marginTop:2,fontFamily:"var(--mono)"}}>{f.e}</p></button>)}
           </div>
-          {/* Step 3 */}
           <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}><div style={{width:24,height:24,borderRadius:"50%",background:"rgba(0,229,255,0.1)",border:"1px solid var(--cyan)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,color:"var(--cyan)",flexShrink:0}}>3</div><span style={{fontWeight:700,fontSize:14}}>Initial Price</span></div>
-          <div style={{position:"relative",marginBottom:22}}><input type="number" placeholder="e.g. 1.0818" step="0.0001" value={price} onChange={e=>setPri(e.target.value)} style={{width:"100%",background:"var(--bg2)",border:"1px solid var(--border2)",borderRadius:10,padding:"12px 14px",paddingRight:130,color:"var(--text0)",fontFamily:"var(--mono)",fontSize:15,outline:"none"}}/><span style={{position:"absolute",right:14,top:"50%",transform:"translateY(-50%)",fontSize:11,color:"var(--text2)",fontFamily:"var(--mono)"}}>{tokB} per {tokA}</span></div>
-          {/* Step 4 */}
+          <div style={{position:"relative",marginBottom:22}}><input type="number" placeholder="e.g. 1.0818" value={price} onChange={e=>setPri(e.target.value)} style={{width:"100%",background:"var(--bg2)",border:"1px solid var(--border2)",borderRadius:10,padding:"12px 14px",paddingRight:130,color:"var(--text0)",fontFamily:"var(--mono)",fontSize:15,outline:"none"}}/><span style={{position:"absolute",right:14,top:"50%",transform:"translateY(-50%)",fontSize:11,color:"var(--text2)",fontFamily:"var(--mono)"}}>{tokB} per {tokA}</span></div>
           <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}><div style={{width:24,height:24,borderRadius:"50%",background:"rgba(0,229,255,0.1)",border:"1px solid var(--cyan)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,color:"var(--cyan)",flexShrink:0}}>4</div><span style={{fontWeight:700,fontSize:14}}>Initial Deposit</span></div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:20}}>
             {[{sym:tokA,val:a0,set:setA0},{sym:tokB,val:a1,set:setA1}].map(({sym,val,set})=>(
@@ -188,16 +182,16 @@ export default function PoolPage() {
               </div>
             ))}
           </div>
-          <button disabled={loading||!price} onClick={()=>doTx("Create Pool",parseFloat(a0)||0.001)} style={{width:"100%",padding:15,borderRadius:12,border:"none",background:loading||!price?"var(--bg3)":"linear-gradient(90deg,#00b4d8,#0077b6)",color:loading||!price?"var(--text2)":"#fff",fontFamily:"var(--mono)",fontSize:15,fontWeight:700,cursor:loading||!price?"not-allowed":"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
+          <button disabled={loading||!price} onClick={()=>doTx("Create Pool")} style={{width:"100%",padding:15,borderRadius:12,border:"none",background:loading||!price?"var(--bg3)":"linear-gradient(90deg,#00b4d8,#0077b6)",color:loading||!price?"var(--text2)":"#fff",fontFamily:"var(--mono)",fontSize:15,fontWeight:700,cursor:loading||!price?"not-allowed":"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
             {loading&&<span className="spinner"/>}{loading?"Processing…":"✨ Create Pool"}
           </button>
+          <BottomStatus/>
         </div>
       )}
 
       {/* ADD */}
       {tab==="add"&&(
         <div className="fade-in" style={{background:"var(--bg1)",border:"1px solid var(--border)",borderRadius:20,padding:24,maxWidth:560}}>
-          {WARN}
           {sel&&<div style={{display:"flex",alignItems:"center",gap:8,background:"rgba(0,229,255,0.06)",border:"1px solid rgba(0,229,255,0.2)",borderRadius:10,padding:"10px 14px",marginBottom:18}}><TI sym={POOLS.find(p=>p.id===sel)!.t0} bg={POOLS.find(p=>p.id===sel)!.c0} size={22}/><TI sym={POOLS.find(p=>p.id===sel)!.t1} bg={POOLS.find(p=>p.id===sel)!.c1} size={22}/><span style={{fontSize:13,fontWeight:700,color:"var(--cyan)",marginLeft:4}}>Adding to {POOLS.find(p=>p.id===sel)?.t0}/{POOLS.find(p=>p.id===sel)?.t1}</span><button onClick={()=>setSel(null)} style={{marginLeft:"auto",background:"none",border:"none",color:"var(--text2)",cursor:"pointer",fontSize:16}}>×</button></div>}
           <div style={{display:"grid",gridTemplateColumns:"1fr auto 1fr",gap:10,alignItems:"center",marginBottom:20}}>
             <select value={tokA} onChange={e=>setTA(e.target.value)} style={{background:"var(--bg2)",border:"1px solid var(--border2)",borderRadius:10,padding:"11px 14px",color:"var(--text0)",fontFamily:"var(--mono)",fontSize:14,fontWeight:700,outline:"none",cursor:"pointer"}}>{TOKS.filter(t=>t.sym!==tokB).map(t=><option key={t.sym} value={t.sym}>{t.sym}</option>)}</select>
@@ -222,19 +216,18 @@ export default function PoolPage() {
             </div>
           </div>
           {(a0||a1)&&<div style={{background:"var(--bg2)",border:"1px solid var(--border)",borderRadius:12,padding:"12px 16px",marginBottom:16}}><IR k="Pool share" v={`${a0?(parseFloat(a0)/14500*100).toFixed(4):"0.0000"}%`}/><IR k="Est. APR" v="~5.8%" green/><IR k="Daily earnings" v={`~$${a0?(parseFloat(a0)*0.058/365).toFixed(4):"0.0000"}`}/></div>}
-          <button disabled={loading||(!a0&&!a1)} onClick={()=>doTx("Add Liquidity",parseFloat(a0||"0")||parseFloat(a1||"0")||0.001)} style={{width:"100%",padding:15,borderRadius:12,border:"none",background:loading||(!a0&&!a1)?"var(--bg3)":"linear-gradient(90deg,#00b4d8,#0077b6)",color:loading||(!a0&&!a1)?"var(--text2)":"#fff",fontFamily:"var(--mono)",fontSize:15,fontWeight:700,cursor:loading||(!a0&&!a1)?"not-allowed":"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
+          <button disabled={loading||(!a0&&!a1)} onClick={()=>doTx("Add Liquidity")} style={{width:"100%",padding:15,borderRadius:12,border:"none",background:loading||(!a0&&!a1)?"var(--bg3)":"linear-gradient(90deg,#00b4d8,#0077b6)",color:loading||(!a0&&!a1)?"var(--text2)":"#fff",fontFamily:"var(--mono)",fontSize:15,fontWeight:700,cursor:loading||(!a0&&!a1)?"not-allowed":"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
             {loading&&<span className="spinner"/>}{loading?"Processing…":"＋ Add Liquidity"}
           </button>
+          <BottomStatus/>
         </div>
       )}
 
       {/* REMOVE */}
       {tab==="remove"&&(
         <div className="fade-in" style={{background:"var(--bg1)",border:"1px solid var(--border)",borderRadius:20,padding:24,maxWidth:560}}>
-          {WARN}
           {!sel?(
-            <div>
-              <p style={{fontSize:13,fontWeight:700,marginBottom:12}}>Select pool to remove from</p>
+            <div><p style={{fontSize:13,fontWeight:700,marginBottom:12}}>Select pool to remove from</p>
               <div style={{display:"flex",flexDirection:"column",gap:8}}>
                 {POOLS.map(p=>(
                   <button key={p.id} onClick={()=>setSel(p.id)} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"13px 16px",borderRadius:12,border:"1px solid var(--border)",background:"var(--bg2)",cursor:"pointer",fontFamily:"var(--mono)",transition:"all 0.2s"}} onMouseEnter={e=>(e.currentTarget.style.borderColor="var(--border2)")} onMouseLeave={e=>(e.currentTarget.style.borderColor="var(--border)")}>
@@ -255,10 +248,11 @@ export default function PoolPage() {
                 </div>
               </div>
               <div style={{background:"var(--bg2)",border:"1px solid var(--border)",borderRadius:12,padding:"12px 16px",marginBottom:18}}><IR k={p.t0} v={`~${(pct*0.24).toFixed(2)}`}/><IR k={p.t1} v={`~${(pct*0.22).toFixed(2)}`}/><IR k="USD Value" v={`~$${(pct*0.46).toFixed(2)}`}/></div>
-              <button disabled={loading} onClick={()=>doTx(`Remove ${pct}% Liquidity`,pct*0.001)} style={{width:"100%",padding:15,borderRadius:12,border:"1px solid rgba(224,65,90,0.4)",background:"rgba(224,65,90,0.14)",color:"var(--red)",fontFamily:"var(--mono)",fontSize:15,fontWeight:700,cursor:loading?"not-allowed":"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:8,marginBottom:8}}>
+              <button disabled={loading} onClick={()=>doTx(`Remove ${pct}% Liquidity`)} style={{width:"100%",padding:15,borderRadius:12,border:"1px solid rgba(224,65,90,0.4)",background:"rgba(224,65,90,0.14)",color:"var(--red)",fontFamily:"var(--mono)",fontSize:15,fontWeight:700,cursor:loading?"not-allowed":"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:8,marginBottom:8}}>
                 {loading&&<span className="spinner"/>}{loading?"Processing…":`Remove ${pct}% Liquidity`}
               </button>
               <button onClick={()=>setSel(null)} style={{width:"100%",padding:10,borderRadius:10,border:"1px solid var(--border)",background:"none",color:"var(--text2)",fontFamily:"var(--mono)",fontSize:13,cursor:"pointer"}}>← Back</button>
+              <BottomStatus/>
             </>
           );})()}
         </div>
