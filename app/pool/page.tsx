@@ -2,7 +2,14 @@
 import { useState } from "react";
 import { useWallet, getBal } from "@/components/WalletProvider";
 import { showToast } from "@/components/Toast";
-import { ARC_EXPLORER } from "@/lib/contracts";
+import { ARC_EXPLORER, CONTRACTS, toUnits, encodeApprove, encodeAllowance } from "@/lib/contracts";
+
+function encodeTransfer(to: string, amount: bigint): string {
+  return "0xa9059cbb" +
+    to.toLowerCase().replace("0x","").padStart(64,"0") +
+    amount.toString(16).padStart(64,"0");
+}
+const POOL_VAULT = CONTRACTS.FX_ESCROW; // Pool vault address (receives liquidity)
 
 const POOLS = [
   { id:"1", t0:"USDC", t1:"EURC",   c0:"#2775CA", c1:"#2B5EDD", fee:"0.05%", tvl:"$2.41M", vol:"$180K", apr:4.2  },
@@ -41,7 +48,7 @@ async function waitTx(hash:string,maxWait=60000):Promise<boolean>{
 }
 
 export default function PoolPage() {
-  const { wallet, openModal } = useWallet();
+  const { wallet, openModal, refreshBalances } = useWallet();
   const [tab,setTab]   = useState<Tab>("pools");
   const [loading,setL] = useState(false);
   const [status,setSt] = useState(""); // shown at bottom
@@ -62,28 +69,67 @@ export default function PoolPage() {
   const tbg = (s:string)=>TOKS.find(t=>t.sym===s)?.bg??"#888";
   const fmtB= (s:string)=>{ const v=wallet.connected?((wallet.balances as unknown as Record<string,number>)[s]??0):0; return s==="cirBTC"?v.toFixed(8):v.toFixed(2); };
 
-  // Real TX: send tiny fee amount on-chain as proof of intent (does NOT deduct actual pool amounts)
+  // Real TX: approve + transfer actual token amounts to pool vault
   async function doTx(action:string) {
     if(!wallet.connected){openModal();return;}
-    setL(true); setSt(`${action} — signing…`);
+    setL(true); setSt(`${action} — preparing…`);
     const eth=(window as any).ethereum;
     try {
       await switchToArc();
-      // Send 0.000001 USDC as symbolic record — pool amounts are NOT deducted
-      const amtRaw=BigInt(1); // 0.000001 USDC (6 decimals)
-      const dst="0x867650F5eAe8df91445971f14d89fd84F0C9a9f8".toLowerCase().replace("0x","").padStart(64,"0");
-      const ar=amtRaw.toString(16).padStart(64,"0");
-      setSt(`${action} — confirm in wallet…`);
-      const txHash:string=await eth.request({method:"eth_sendTransaction",params:[{from:wallet.address,to:"0x3600000000000000000000000000000000000000",data:"0xa9059cbb"+dst+ar,gas:"0x186A0"}]});
-      setSt("Waiting for confirmation…");
-      const ok=await waitTx(txHash);
-      if(ok){
-        const now=new Date();
-        const time=[now.getHours(),now.getMinutes(),now.getSeconds()].map(n=>String(n).padStart(2,"0")).join(":");
-        setTx({hash:txHash,action,time});
-        showToast(true,`${action} Confirmed ✓`,`TX: ${txHash.slice(0,10)}…`);
-        setA0(""); setA1("");
-      } else showToast(false,"Transaction Failed","Check explorer.");
+
+      const txHashes: string[] = [];
+      const tokens = [
+        a0 && parseFloat(a0) > 0 ? { sym: tokA, amt: parseFloat(a0) } : null,
+        a1 && parseFloat(a1) > 0 ? { sym: tokB, amt: parseFloat(a1) } : null,
+      ].filter(Boolean) as { sym: string; amt: number }[];
+
+      if (tokens.length === 0) throw new Error("Enter at least one token amount.");
+
+      for (const { sym, amt } of tokens) {
+        const tokenAddr = sym === "USDC" ? CONTRACTS.USDC : sym === "EURC" ? CONTRACTS.EURC : CONTRACTS.cirBTC;
+        const decimals  = sym === "cirBTC" ? 8 : 6;
+        const amtRaw    = toUnits(amt, decimals);
+
+        // Check allowance first, approve MaxUint256 only if needed
+        const MAX_UINT256 = BigInt("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+        setSt(`Checking ${sym} allowance…`);
+        const allowData = encodeAllowance(wallet.address, POOL_VAULT);
+        let allowRaw = "0x0";
+        try { allowRaw = await eth.request({ method: "eth_call", params: [{ to: tokenAddr, data: allowData }, "latest"] }); } catch {}
+        const allowance = allowRaw && allowRaw !== "0x" ? BigInt(allowRaw) : 0n;
+        if (allowance < amtRaw) {
+          setSt(`Approving ${sym} (unlimited) — confirm in wallet…`);
+          const approveTx: string = await eth.request({
+            method: "eth_sendTransaction",
+            params: [{ from: wallet.address, to: tokenAddr, data: encodeApprove(POOL_VAULT, MAX_UINT256), gas: "0x186A0" }],
+          });
+          setSt(`Waiting for ${sym} approve…`);
+          const approveOk = await waitTx(approveTx);
+          if (!approveOk) throw new Error(`${sym} approve failed.`);
+        } else {
+          setSt(`${sym} allowance OK — skipping approve.`);
+          await new Promise(r => setTimeout(r, 400));
+        }
+
+        // Transfer to pool vault
+        setSt(`Depositing ${sym} — confirm in wallet…`);
+        const depositTx: string = await eth.request({
+          method: "eth_sendTransaction",
+          params: [{ from: wallet.address, to: tokenAddr, data: encodeTransfer(POOL_VAULT, amtRaw), gas: "0x30D40" }],
+        });
+        setSt(`Waiting for ${sym} deposit…`);
+        const depositOk = await waitTx(depositTx);
+        if (!depositOk) throw new Error(`${sym} deposit failed.`);
+        txHashes.push(depositTx);
+      }
+
+      const now=new Date();
+      const time=[now.getHours(),now.getMinutes(),now.getSeconds()].map(n=>String(n).padStart(2,"0")).join(":");
+      const lastHash = txHashes[txHashes.length - 1];
+      setTx({hash:lastHash,action,time});
+      showToast(true,`${action} Confirmed ✓`,`TX: ${lastHash.slice(0,10)}…`);
+      setA0(""); setA1("");
+      await refreshBalances();
     }catch(err:any){
       const msg=err?.message||String(err);
       if(msg.includes("4001")||/reject|denied|cancel/i.test(msg)) showToast(false,"Cancelled","Rejected in wallet.");

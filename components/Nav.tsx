@@ -12,19 +12,53 @@ const LINKS = [
   { href:"/send",   label:"Send Tokens" },
 ];
 
+const CHAINS = [
+  { id:"arc",     label:"Arc Testnet",    hex:"0x4cef52", dot:"#00b4d8", rpc:"https://rpc.testnet.arc.network", explorer:"https://testnet.arcscan.app" },
+  { id:"sepolia", label:"Eth Sepolia",    hex:"0xaa36a7", dot:"#627EEA", rpc:"https://rpc.sepolia.org", explorer:"https://sepolia.etherscan.io" },
+  { id:"fuji",    label:"Avax Fuji",      hex:"0xa869",   dot:"#E84142", rpc:"https://api.avax-test.network/ext/bc/C/rpc", explorer:"https://testnet.snowtrace.io" },
+];
+
 function short(a:string){ return a.slice(0,6)+"…"+a.slice(-4); }
 function fmt(n:number, dec=4){ if(n===0)return "0"; if(n<0.00000001)return "<0.00000001"; if(n<0.0001)return n.toFixed(8); return n.toLocaleString(undefined,{maximumFractionDigits:dec}); }
 
 export default function Nav() {
   const path = usePathname();
   const { wallet, disconnect, openModal, refreshBalances } = useWallet();
-  const [gas,       setGas]     = useState(8);
-  const [menuOpen,  setMenu]    = useState(false);
-  const [refreshing,setRef]     = useState(false);
-  const menuRef = useRef<HTMLDivElement>(null);
+  const [gas,        setGas]      = useState(8);
+  const [menuOpen,   setMenu]     = useState(false);
+  const [chainOpen,  setChainOpen]= useState(false);
+  const [refreshing, setRef]      = useState(false);
+  const [currentHex, setCurrentHex] = useState<string|null>(null);
+  const menuRef  = useRef<HTMLDivElement>(null);
+  const chainRef = useRef<HTMLDivElement>(null);
 
   useEffect(()=>{ const id=setInterval(()=>setGas(g=>Math.max(4,Math.min(25,g+(Math.random()>.5?1:-1)))),3000); return ()=>clearInterval(id); },[]);
-  useEffect(()=>{ const h=(e:MouseEvent)=>{ if(menuRef.current&&!menuRef.current.contains(e.target as Node))setMenu(false); }; document.addEventListener("mousedown",h); return ()=>document.removeEventListener("mousedown",h); },[]);
+  useEffect(()=>{ const h=(e:MouseEvent)=>{ if(menuRef.current&&!menuRef.current.contains(e.target as Node))setMenu(false); if(chainRef.current&&!chainRef.current.contains(e.target as Node))setChainOpen(false); }; document.addEventListener("mousedown",h); return ()=>document.removeEventListener("mousedown",h); },[]);
+
+  // Detect current chain from MetaMask
+  useEffect(()=>{
+    const eth=(window as any).ethereum;
+    if(!eth)return;
+    eth.request({method:"eth_chainId"}).then((c:string)=>setCurrentHex(c?.toLowerCase())).catch(()=>{});
+    const onChain=(c:string)=>setCurrentHex(c?.toLowerCase());
+    eth.on("chainChanged",onChain);
+    return ()=>eth.removeListener?.("chainChanged",onChain);
+  },[wallet.connected]);
+
+  async function switchChain(chain: typeof CHAINS[0]){
+    const eth=(window as any).ethereum;
+    if(!eth)return;
+    try{
+      await eth.request({method:"wallet_switchEthereumChain",params:[{chainId:chain.hex}]});
+    }catch(e:any){
+      if(e.code===4902){
+        await eth.request({method:"wallet_addEthereumChain",params:[{chainId:chain.hex,chainName:chain.label,nativeCurrency:{name:"ETH",symbol:"ETH",decimals:18},rpcUrls:[chain.rpc],blockExplorerUrls:[chain.explorer]}]});
+      }
+    }
+    setChainOpen(false);
+  }
+
+  const activeChain = CHAINS.find(c=>c.hex===currentHex) ?? CHAINS[0];
 
   async function handleRefresh(){ setRef(true); await refreshBalances(); setRef(false); }
 
@@ -46,7 +80,35 @@ export default function Nav() {
       </div>
 
       <div className="nav-right">
-        <div className="net-indicator"><div className="net-dot"/><span style={{fontFamily:"var(--mono)",fontSize:11}}>Arc Testnet</span></div>
+        {/* Chain Selector */}
+        <div style={{position:"relative"}} ref={chainRef}>
+          <button
+            onClick={()=>setChainOpen(o=>!o)}
+            style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",borderRadius:8,border:"1px solid var(--border)",background:"var(--bg2)",cursor:"pointer",fontFamily:"var(--mono)",fontSize:11,fontWeight:700,color:"var(--text1)",transition:"all 0.2s"}}
+            onMouseEnter={e=>(e.currentTarget.style.borderColor="var(--border2)")}
+            onMouseLeave={e=>(e.currentTarget.style.borderColor="var(--border)")}
+          >
+            <div style={{width:8,height:8,borderRadius:"50%",background:activeChain.dot,boxShadow:`0 0 4px ${activeChain.dot}`}}/>
+            {activeChain.label}
+            <svg width="8" height="5" viewBox="0 0 10 6" fill="none"><path d="M1 1l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
+          </button>
+          {chainOpen&&(
+            <div style={{position:"absolute",top:"calc(100% + 6px)",left:0,background:"var(--bg1)",border:"1px solid var(--border)",borderRadius:10,minWidth:160,zIndex:200,overflow:"hidden",boxShadow:"0 8px 24px rgba(0,0,0,0.4)"}}>
+              {CHAINS.map(chain=>(
+                <button key={chain.id} onClick={()=>switchChain(chain)}
+                  style={{display:"flex",alignItems:"center",gap:8,width:"100%",padding:"9px 12px",border:"none",background:currentHex===chain.hex?"var(--bg2)":"transparent",cursor:"pointer",fontFamily:"var(--mono)",fontSize:12,fontWeight:700,color:currentHex===chain.hex?"var(--cyan)":"var(--text1)",transition:"all 0.15s",textAlign:"left"}}
+                  onMouseEnter={e=>(e.currentTarget.style.background="var(--bg2)")}
+                  onMouseLeave={e=>(e.currentTarget.style.background=currentHex===chain.hex?"var(--bg2)":"transparent")}
+                >
+                  <div style={{width:8,height:8,borderRadius:"50%",background:chain.dot,flexShrink:0}}/>
+                  {chain.label}
+                  {currentHex===chain.hex&&<span style={{marginLeft:"auto",fontSize:10,color:"var(--cyan)"}}>✓</span>}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
         <div className="gas-badge"><span>🔥</span><span>{gas} Gwei Gas</span></div>
 
         {wallet.connected ? (
