@@ -387,7 +387,7 @@ Recipient: ${wallet.address}`);
           <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
             <div style={{ width: 8, height: 8, borderRadius: "50%", background: from.color, boxShadow: `0 0 5px ${from.color}` }} />
             <span style={{ fontSize: 13, fontWeight: 600 }}>{from.label}</span>
-            <span style={{ fontSize: 10, color: "var(--text2)", fontFamily: "var(--mono)" }}>domain {from.domain}</span>
+            
           </div>
           <div style={{ flex: 1, position: "relative", display: "flex", alignItems: "center" }}>
             <div style={{ flex: 1, borderTop: "1px dashed var(--border2)" }} />
@@ -396,7 +396,7 @@ Recipient: ${wallet.address}`);
           <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
             <div style={{ width: 8, height: 8, borderRadius: "50%", background: to.color, boxShadow: `0 0 5px ${to.color}` }} />
             <span style={{ fontSize: 13, fontWeight: 600 }}>{to.label}</span>
-            <span style={{ fontSize: 10, color: "var(--text2)", fontFamily: "var(--mono)" }}>domain {to.domain}</span>
+            
           </div>
         </div>
 

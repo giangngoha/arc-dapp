@@ -137,6 +137,40 @@ export default function PoolPage() {
     }finally{setL(false);setSt("");}
   }
 
+  // Remove liquidity: send 0.000001 USDC as on-chain record of removal
+  async function doRemove(pct: number) {
+    if(!wallet.connected){openModal();return;}
+    setL(true); setSt(`Remove ${pct}% Liquidity — preparing…`);
+    const eth=(window as any).ethereum;
+    try {
+      await switchToArc();
+      // Encode ERC20 transfer of 1 subunit (0.000001 USDC) to pool vault as removal record
+      const amtRaw = 1n;
+      const dst = POOL_VAULT.toLowerCase().replace("0x","").padStart(64,"0");
+      const ar = amtRaw.toString(16).padStart(64,"0");
+      const data = "0xa9059cbb" + dst + ar;
+      setSt(`Remove ${pct}% — confirm in wallet…`);
+      const txHash: string = await eth.request({
+        method: "eth_sendTransaction",
+        params: [{ from: wallet.address, to: CONTRACTS.USDC, data, gas: "0x186A0" }],
+      });
+      setSt("Waiting for confirmation…");
+      const ok = await waitTx(txHash);
+      if (ok) {
+        const now=new Date();
+        const time=[now.getHours(),now.getMinutes(),now.getSeconds()].map(n=>String(n).padStart(2,"0")).join(":");
+        setTx({hash:txHash,action:`Remove ${pct}% Liquidity`,time});
+        showToast(true,`Remove ${pct}% Confirmed ✓`,`TX: ${txHash.slice(0,10)}…`);
+        setSel(null);
+        await refreshBalances();
+      } else showToast(false,"Transaction Failed","Check explorer.");
+    }catch(err:any){
+      const msg=err?.message||String(err);
+      if(msg.includes("4001")||/reject|denied|cancel/i.test(msg)) showToast(false,"Cancelled","Rejected in wallet.");
+      else showToast(false,"Error",msg.slice(0,120));
+    }finally{setL(false);setSt("");}
+  }
+
   function TB(t:Tab,l:string){ const a=tab===t;
     return <button onClick={()=>setTab(t)} style={{flex:1,padding:"10px 0",border:"none",borderRadius:0,background:"transparent",color:a?"var(--text0)":"var(--text2)",fontFamily:"var(--mono)",fontSize:13,fontWeight:700,cursor:"pointer",borderBottom:a?"2px solid var(--cyan)":"2px solid transparent",transition:"all 0.2s"}}>{l}</button>;
   }
@@ -294,7 +328,7 @@ export default function PoolPage() {
                 </div>
               </div>
               <div style={{background:"var(--bg2)",border:"1px solid var(--border)",borderRadius:12,padding:"12px 16px",marginBottom:18}}><IR k={p.t0} v={`~${(pct*0.24).toFixed(2)}`}/><IR k={p.t1} v={`~${(pct*0.22).toFixed(2)}`}/><IR k="USD Value" v={`~$${(pct*0.46).toFixed(2)}`}/></div>
-              <button disabled={loading} onClick={()=>doTx(`Remove ${pct}% Liquidity`)} style={{width:"100%",padding:15,borderRadius:12,border:"1px solid rgba(224,65,90,0.4)",background:"rgba(224,65,90,0.14)",color:"var(--red)",fontFamily:"var(--mono)",fontSize:15,fontWeight:700,cursor:loading?"not-allowed":"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:8,marginBottom:8}}>
+              <button disabled={loading} onClick={()=>doRemove(pct)} style={{width:"100%",padding:15,borderRadius:12,border:"1px solid rgba(224,65,90,0.4)",background:"rgba(224,65,90,0.14)",color:"var(--red)",fontFamily:"var(--mono)",fontSize:15,fontWeight:700,cursor:loading?"not-allowed":"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:8,marginBottom:8}}>
                 {loading&&<span className="spinner"/>}{loading?"Processing…":`Remove ${pct}% Liquidity`}
               </button>
               <button onClick={()=>setSel(null)} style={{width:"100%",padding:10,borderRadius:10,border:"1px solid var(--border)",background:"none",color:"var(--text2)",fontFamily:"var(--mono)",fontSize:13,cursor:"pointer"}}>← Back</button>
