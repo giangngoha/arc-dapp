@@ -2,187 +2,295 @@
 import { useState, useEffect, useRef } from "react";
 import { useWallet, getBal } from "@/components/WalletProvider";
 import { showToast } from "@/components/Toast";
-import { swapTokens, estimateSwapRate } from "./actions";
-import TokenSelector, { type TokenInfo } from "@/components/TokenSelector";
-import SwapSettings, { type SwapConfig } from "@/components/SwapSettings";
-import { ARC_EXPLORER } from "@/lib/contracts";
+import { ARC_EXPLORER, CONTRACTS, toUnits, encodeApprove, encodeAllowance } from "@/lib/contracts";
+
+// ─── Uniswap V2 on Arc Testnet (deployed by osr21/arc-swap) ──────────────────
+const ROUTER   = "0xe27d5d256b370604f1ff060fb489c6a8e3f8a6d9";
+const PAIR     = "0xb3685D16AAa06361ED28377b1319136650Fa9A13";
+const USDC     = CONTRACTS.USDC;
+const EURC     = CONTRACTS.EURC;
+const MAX_U256 = BigInt("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+
+// Arc Testnet quirk: eth_estimateGas is broken — use explicit gas limits
+const GAS_APPROVE = "0x186A0";   // 100,000
+const GAS_SWAP    = "0x3D090";   // 250,000
+
+// getAmountsOut(uint256 amountIn, address[] path) → uint256[]
+function encodeGetAmountsOut(amtIn: bigint, tokenIn: string, tokenOut: string): string {
+  const sel    = "0xd06ca61f";
+  const offset = (64).toString(16).padStart(64, "0"); // offset to array
+  const len    = (2).toString(16).padStart(64, "0");  // 2 addresses
+  const a0     = tokenIn.toLowerCase().replace("0x","").padStart(64,"0");
+  const a1     = tokenOut.toLowerCase().replace("0x","").padStart(64,"0");
+  return sel + amtIn.toString(16).padStart(64,"0") + offset + len + a0 + a1;
+}
+
+// swapExactTokensForTokens(uint256 amountIn, uint256 amountOutMin, address[] path, address to, uint256 deadline)
+function encodeSwap(amtIn: bigint, amtOutMin: bigint, tokenIn: string, tokenOut: string, to: string, deadline: bigint): string {
+  const sel     = "0x38ed1739";
+  const pathOff = (5 * 32).toString(16).padStart(64,"0"); // offset: after 5 fixed params
+  const len     = (2).toString(16).padStart(64,"0");
+  const a0      = tokenIn.toLowerCase().replace("0x","").padStart(64,"0");
+  const a1      = tokenOut.toLowerCase().replace("0x","").padStart(64,"0");
+  return (
+    sel +
+    amtIn.toString(16).padStart(64,"0") +
+    amtOutMin.toString(16).padStart(64,"0") +
+    pathOff +
+    to.toLowerCase().replace("0x","").padStart(64,"0") +
+    deadline.toString(16).padStart(64,"0") +
+    len + a0 + a1
+  );
+}
+
+// getReserves() → (uint112,uint112,uint32)
+function encodeGetReserves(): string { return "0x0902f1ac"; }
+
+async function rpcCall(method: string, params: unknown[]): Promise<unknown> {
+  const res = await fetch("https://rpc.testnet.arc.network", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+  });
+  const j = await res.json();
+  if (j.error) throw new Error(j.error.message ?? JSON.stringify(j.error));
+  return j.result;
+}
+
+async function switchToArc() {
+  const eth = (window as any).ethereum;
+  const hex = "0x4cef52";
+  let cur: string | undefined;
+  try { cur = await eth.request({ method: "eth_chainId" }); } catch {}
+  if (cur?.toLowerCase() === hex) return;
+  try { await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: hex }] }); }
+  catch (e: any) {
+    if (e.code === 4902) await eth.request({ method: "wallet_addEthereumChain", params: [{ chainId: hex, chainName: "Arc Network Testnet", nativeCurrency: { name: "USDC", symbol: "USDC", decimals: 18 }, rpcUrls: ["https://rpc.testnet.arc.network"], blockExplorerUrls: ["https://testnet.arcscan.app"] }] });
+    else throw e;
+  }
+  for (let i = 0; i < 20; i++) {
+    await new Promise(r => setTimeout(r, 400));
+    try { const c = await eth.request({ method: "eth_chainId" }); if (c?.toLowerCase() === hex) return; } catch {}
+  }
+}
+
+async function waitTx(hash: string, maxMs = 90000): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < maxMs) {
+    await new Promise(r => setTimeout(r, 3000));
+    try {
+      const r: any = await rpcCall("eth_getTransactionReceipt", [hash]);
+      if (r && r.blockNumber) {
+        // Got receipt - check status
+        return r.status === "0x1" || r.status === 1;
+      }
+    } catch {}
+  }
+  return false;
+}
 
 export default function SwapPage() {
   const { wallet, openModal, refreshBalances } = useWallet();
-  const [loading,    setLoading]    = useState(false);
-  const [status,     setStatus]     = useState("");
-  const [result,     setResult]     = useState<{
-    success: boolean;
-    txHash?: string;
-    amountOut?: string;
-    error?: string;
-  } | null>(null);
-  const [estimate,   setEstimate]   = useState<{
-    estimatedAmountOut?: string;
-    exchangeRate?: string;
-    priceImpact?: string;
-  } | null>(null);
+  const [tokenIn,  setTokenIn]  = useState<"USDC"|"EURC">("USDC");
+  const [amountIn, setAmountIn] = useState("");
+  const [estimate, setEstimate] = useState<{ amtOut: string; rate: string; impact: string } | null>(null);
   const [estimating, setEstimating] = useState(false);
-  const [tokenIn,    setTokenIn]    = useState<TokenInfo>({ symbol: "USDC" });
-  const [tokenOut,   setTokenOut]   = useState<TokenInfo>({ symbol: "EURC" });
-  const [settings,   setSettings]   = useState<SwapConfig>({ slippage: 0.5, gasPriceMode: "normal" });
-  const [amountIn,   setAmountIn]   = useState("");
-  const estimateTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [loading,  setLoading]  = useState(false);
+  const [status,   setStatus]   = useState("");
+  const [result,   setResult]   = useState<{ success: boolean; txHash?: string; amountOut?: string; error?: string } | null>(null);
+  const [slippage, setSlippage] = useState(0.5);
+  const [reserves, setReserves] = useState<{ usdc: number; eurc: number } | null>(null);
+  const debounce = useRef<ReturnType<typeof setTimeout>|null>(null);
 
-  const balIn  = wallet.connected ? getBal(wallet.balances, tokenIn.symbol)  : 0;
-  const balOut = wallet.connected ? getBal(wallet.balances, tokenOut.symbol) : 0;
+  const tokenOut = tokenIn === "USDC" ? "EURC" : "USDC";
+  const tokenInAddr  = tokenIn  === "USDC" ? USDC : EURC;
+  const tokenOutAddr = tokenOut === "USDC" ? USDC : EURC;
+  const balIn  = wallet.connected ? getBal(wallet.balances, tokenIn)  : 0;
+  const balOut = wallet.connected ? getBal(wallet.balances, tokenOut) : 0;
   const amtNum = parseFloat(amountIn) || 0;
 
-  // Auto-estimate when amount/tokens change
+  // Load reserves from pair contract
   useEffect(() => {
-    if (!amtNum || amtNum <= 0 || tokenIn.symbol === tokenOut.symbol) {
-      setEstimate(null);
-      return;
-    }
-    if (estimateTimer.current) clearTimeout(estimateTimer.current);
-    estimateTimer.current = setTimeout(async () => {
+    rpcCall("eth_call", [{ to: PAIR, data: encodeGetReserves() }, "latest"])
+      .then((r: any) => {
+        if (!r || r === "0x") return;
+        const hex = r.replace("0x","");
+        // getReserves returns (reserve0, reserve1, blockTimestamp) each padded to 32 bytes
+        // reserve0 = USDC (first token in pair), reserve1 = EURC
+        const r0 = parseInt(hex.slice(0,64), 16) / 1e6;
+        const r1 = parseInt(hex.slice(64,128), 16) / 1e6;
+        setReserves({ usdc: r0, eurc: r1 });
+      }).catch(() => {});
+  }, []);
+
+  // Auto-estimate via getAmountsOut
+  useEffect(() => {
+    if (!amtNum || amtNum <= 0) { setEstimate(null); return; }
+    if (debounce.current) clearTimeout(debounce.current);
+    debounce.current = setTimeout(async () => {
       setEstimating(true);
       try {
-        const fd = new FormData();
-        fd.set("chain", "Arc_Testnet");
-        fd.set("tokenIn", tokenIn.symbol);
-        fd.set("tokenOut", tokenOut.symbol);
-        fd.set("amountIn", amountIn);
-        const res = await estimateSwapRate(fd);
-        if (res.success && res.data) {
-          setEstimate(res.data as typeof estimate);
-        } else {
-          setEstimate(null);
-        }
-      } catch {
-        setEstimate(null);
-      } finally {
-        setEstimating(false);
-      }
-    }, 600);
+        const amtInRaw = toUnits(amtNum, 6);
+        const data = encodeGetAmountsOut(amtInRaw, tokenInAddr, tokenOutAddr);
+        const r: any = await rpcCall("eth_call", [{ to: ROUTER, data }, "latest"]);
+        if (!r || r === "0x") { setEstimate(null); return; }
+        const hex = r.replace("0x","");
+        // Returns: [offset(32), length(32), amounts[0](32), amounts[1](32)]
+        const amtOutRaw = BigInt("0x" + hex.slice(192, 256));
+        const amtOut = Number(amtOutRaw) / 1e6;
+        const rate = (amtOut / amtNum).toFixed(6);
+        const impact = (Math.abs(1 - amtOut / amtNum) * 100).toFixed(2);
+        setEstimate({ amtOut: amtOut.toFixed(6), rate, impact });
+      } catch { setEstimate(null); }
+      finally { setEstimating(false); }
+    }, 500);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [amountIn, tokenIn.symbol, tokenOut.symbol]);
+  }, [amountIn, tokenIn]);
 
   async function handleSwap(e: React.FormEvent) {
     e.preventDefault();
     if (!wallet.connected) { openModal(); return; }
-    if (!amtNum || tokenIn.symbol === tokenOut.symbol) return;
-
-    setLoading(true); setStatus("Preparing swap…"); setResult(null);
+    if (!amtNum) return;
+    setLoading(true); setStatus(""); setResult(null);
+    const eth = (window as any).ethereum;
     try {
-      const fd = new FormData();
-      fd.set("chain",     "Arc_Testnet");
-      fd.set("tokenIn",   tokenIn.symbol);
-      fd.set("tokenOut",  tokenOut.symbol);
-      fd.set("amountIn",  amountIn);
-      fd.set("toAddress", wallet.address); // ← KEY FIX: output goes to user wallet
+      await switchToArc();
+      const amtInRaw   = toUnits(amtNum, 6);
+      const amtOutNum  = estimate ? parseFloat(estimate.amtOut) : amtNum * 0.9;
+      const amtOutMin  = toUnits(amtOutNum * (1 - slippage / 100), 6);
+      const deadline   = BigInt(Math.floor(Date.now() / 1000) + 1200); // 20 min
 
-      setStatus(`Swapping ${amountIn} ${tokenIn.symbol} → ${tokenOut.symbol}…`);
-      const res = await swapTokens(fd);
+      // ── 1. Check & approve Router ──
+      setStatus("Checking allowance…");
+      const allowRaw: any = await rpcCall("eth_call", [{ to: tokenInAddr, data: encodeAllowance(wallet.address, ROUTER) }, "latest"]);
+      const allowance = allowRaw && allowRaw !== "0x" ? BigInt(allowRaw) : 0n;
 
-      if (res.success) {
-        const d = res.data as any;
-        const txHash    = d?.txHash    ?? d?.transactionHash ?? d?.hash ?? undefined;
-        const amountOut = d?.amountOut ?? d?.estimatedAmountOut ?? estimate?.estimatedAmountOut ?? undefined;
-        setResult({ success: true, txHash, amountOut });
-        showToast(true, "Swap Confirmed ✓", `${amountIn} ${tokenIn.symbol} → ${tokenOut.symbol}`);
-        setAmountIn("");
-        setEstimate(null);
-        // Refresh balance after a short delay to let chain settle
-        setTimeout(() => refreshBalances(), 2000);
-        await refreshBalances();
-      } else {
-        setResult({ success: false, error: res.error });
-        showToast(false, "Swap Failed", res.error?.slice(0, 100) ?? "Unknown error");
+      if (allowance < amtInRaw) {
+        setStatus(`Approving ${tokenIn} — confirm in wallet…`);
+        const approveTx: string = await eth.request({
+          method: "eth_sendTransaction",
+          params: [{ from: wallet.address, to: tokenInAddr, data: encodeApprove(ROUTER, MAX_U256), gas: GAS_APPROVE }],
+        });
+        setStatus("Waiting for approval to confirm on Arc…");
+        const approveOk = await waitTx(approveTx, 90000);
+        if (!approveOk) throw new Error(`Approve TX not confirmed. Hash: ${approveTx}`);
+        // Extra wait for Arc to process state change
+        setStatus("Approve confirmed, preparing swap…");
+        await new Promise(r => setTimeout(r, 3000));
+        // Verify allowance actually updated
+        const newAllowRaw: any = await rpcCall("eth_call", [{ to: tokenInAddr, data: encodeAllowance(wallet.address, ROUTER) }, "latest"]);
+        const newAllow = newAllowRaw && newAllowRaw !== "0x" ? BigInt(newAllowRaw) : 0n;
+        if (newAllow < amtInRaw) throw new Error(`Allowance not updated after approve. Got: ${Number(newAllow)/1e6}, needed: ${amtNum}`);
       }
+
+      // ── 2. swapExactTokensForTokens ──
+      setStatus(`Swapping ${tokenIn} → ${tokenOut} — confirm in wallet…`);
+      const swapData = encodeSwap(amtInRaw, amtOutMin, tokenInAddr, tokenOutAddr, wallet.address, deadline);
+      const swapTx: string = await eth.request({
+        method: "eth_sendTransaction",
+        params: [{ from: wallet.address, to: ROUTER, data: swapData, gas: GAS_SWAP }],
+      });
+      setStatus("Waiting for swap confirmation…");
+      const ok = await waitTx(swapTx);
+      if (!ok) throw new Error(`Swap reverted. Check: ${ARC_EXPLORER}/tx/${swapTx}`);
+
+      setResult({ success: true, txHash: swapTx, amountOut: estimate?.amtOut });
+      showToast(true, "Swap Confirmed ✓", `${amtNum} ${tokenIn} → ~${estimate?.amtOut ?? "?"} ${tokenOut}`);
+      setAmountIn(""); setEstimate(null);
+      setTimeout(() => refreshBalances(), 1500);
+      await refreshBalances();
     } catch (err: any) {
       const msg = err?.message || String(err);
-      setResult({ success: false, error: msg.slice(0, 300) });
-      showToast(false, "Swap Error", msg.slice(0, 100));
-    } finally {
-      setLoading(false);
-      setStatus("");
-    }
+      if (msg.includes("4001") || /reject|denied|cancel/i.test(msg)) {
+        showToast(false, "Cancelled", "Rejected in wallet.");
+        setResult({ success: false, error: "User rejected." });
+      } else {
+        setResult({ success: false, error: msg.slice(0, 300) });
+        showToast(false, "Swap Failed", msg.slice(0, 80));
+      }
+    } finally { setLoading(false); setStatus(""); }
   }
 
-  const impactColor = (v: string | undefined) => {
-    if (!v) return "var(--text2)";
+  const impactColor = (v: string) => {
     const n = parseFloat(v);
-    if (isNaN(n)) return "var(--text2)";
     return n < 1 ? "var(--green)" : n < 3 ? "#f59e0b" : "var(--red)";
   };
 
   return (
     <div style={{ maxWidth: 480, margin: "0 auto" }}>
-      {/* Header */}
       <div style={{ marginBottom: 20, display: "flex", alignItems: "center", gap: 12 }}>
         <div style={{ width: 40, height: 40, borderRadius: 12, background: "rgba(0,200,150,0.15)", border: "1px solid rgba(0,200,150,0.3)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20 }}>🔄</div>
         <div>
           <h1 style={{ fontSize: 22, fontWeight: 800, margin: 0 }}>Swap Exchange</h1>
-          <p style={{ fontSize: 12, color: "var(--text2)", margin: 0 }}>Arc Testnet · Circle StableFX</p>
+          <p style={{ fontSize: 12, color: "var(--text2)", margin: 0 }}>Uniswap V2 AMM · Arc Testnet</p>
         </div>
-        <div style={{ marginLeft: "auto" }}><SwapSettings config={settings} onChange={setSettings} /></div>
+        {/* Slippage selector */}
+        <div style={{ marginLeft: "auto", display: "flex", gap: 4 }}>
+          {[0.1, 0.5, 1.0].map(s => (
+            <button key={s} onClick={() => setSlippage(s)}
+              style={{ padding: "4px 8px", borderRadius: 6, border: "1px solid", borderColor: slippage===s ? "var(--cyan)" : "var(--border)", background: slippage===s ? "rgba(0,229,255,0.1)" : "var(--bg2)", color: slippage===s ? "var(--cyan)" : "var(--text2)", fontSize: 11, cursor: "pointer", fontFamily: "var(--mono)", fontWeight: 700 }}>
+              {s}%
+            </button>
+          ))}
+        </div>
       </div>
+
+      {/* Pool reserves */}
+      {reserves && (
+        <div style={{ background: "var(--bg2)", border: "1px solid var(--border)", borderRadius: 10, padding: "8px 14px", marginBottom: 12, display: "flex", gap: 20, fontSize: 11, fontFamily: "var(--mono)", color: "var(--text2)" }}>
+          <span>Pool: <strong style={{ color: "var(--text1)" }}>{reserves.usdc.toFixed(2)} USDC</strong></span>
+          <span>/ <strong style={{ color: "var(--text1)" }}>{reserves.eurc.toFixed(2)} EURC</strong></span>
+          <span style={{ marginLeft: "auto" }}>Rate: 1 USDC ≈ {(reserves.eurc / reserves.usdc).toFixed(4)} EURC</span>
+        </div>
+      )}
 
       <div style={{ background: "var(--bg1)", border: "1px solid var(--border)", borderRadius: 20, padding: "20px 20px 16px" }}>
         <form onSubmit={handleSwap}>
           {/* Sell box */}
           <div style={{ background: "var(--bg2)", border: "1px solid var(--border)", borderRadius: 14, padding: "14px 16px", marginBottom: 8 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
               <span style={{ fontSize: 12, color: "var(--text2)", fontWeight: 600 }}>Sell (From)</span>
-              {wallet.connected && (
-                <span
-                  style={{ fontSize: 12, color: "var(--cyan)", cursor: "pointer", fontFamily: "var(--mono)" }}
-                  onClick={() => setAmountIn(balIn.toFixed(2))}
-                >
-                  Balance: <strong>{balIn.toFixed(4)}</strong>
-                </span>
-              )}
+              {wallet.connected && <span style={{ fontSize: 12, color: "var(--cyan)", cursor: "pointer", fontFamily: "var(--mono)" }} onClick={() => setAmountIn(balIn.toFixed(2))}>Balance: <strong>{balIn.toFixed(4)}</strong></span>}
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <input
-                type="number" placeholder="0.0" step="0.01" min="0" value={amountIn}
+              <input type="number" placeholder="0.0" step="0.01" min="0" value={amountIn}
                 onChange={e => { setAmountIn(e.target.value); setResult(null); }}
-                style={{ flex: 1, background: "none", border: "none", outline: "none", fontSize: 28, fontWeight: 700, color: "var(--text0)", fontFamily: "var(--mono)", minWidth: 0 }}
-              />
-              <TokenSelector label="" name="tokenIn" value={tokenIn} onChange={t => { setTokenIn(t); setResult(null); setEstimate(null); }} />
+                style={{ flex: 1, background: "none", border: "none", outline: "none", fontSize: 28, fontWeight: 700, color: "var(--text0)", fontFamily: "var(--mono)", minWidth: 0 }} />
+              <div style={{ display: "flex", gap: 6 }}>
+                {(["USDC","EURC"] as const).map(t => (
+                  <button key={t} type="button" onClick={() => { if(tokenIn!==t){setTokenIn(t);setAmountIn("");setEstimate(null);setResult(null);}}}
+                    style={{ padding: "6px 12px", borderRadius: 20, border: "1px solid", borderColor: tokenIn===t ? "var(--cyan)" : "var(--border)", background: tokenIn===t ? "rgba(0,229,255,0.1)" : "var(--bg3)", color: tokenIn===t ? "var(--cyan)" : "var(--text1)", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>
+                    {t}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
 
-          {/* Flip button */}
+          {/* Flip */}
           <div style={{ display: "flex", justifyContent: "center", margin: "4px 0" }}>
-            <button
-              type="button"
-              onClick={() => { setTokenIn(tokenOut); setTokenOut(tokenIn); setAmountIn(""); setEstimate(null); setResult(null); }}
-              style={{ width: 36, height: 36, borderRadius: 10, border: "1px solid var(--border)", background: "var(--bg1)", color: "var(--cyan)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18, fontWeight: 700 }}
-            >⇅</button>
+            <button type="button" onClick={() => { setTokenIn(tokenOut as "USDC"|"EURC"); setAmountIn(""); setEstimate(null); setResult(null); }}
+              style={{ width: 36, height: 36, borderRadius: 10, border: "1px solid var(--border)", background: "var(--bg1)", color: "var(--cyan)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18, fontWeight: 700 }}>⇅</button>
           </div>
 
           {/* Buy box */}
           <div style={{ background: "var(--bg2)", border: "1px solid var(--border)", borderRadius: 14, padding: "14px 16px", marginBottom: 14 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
               <span style={{ fontSize: 12, color: "var(--text2)", fontWeight: 600 }}>Buy (To)</span>
-              {wallet.connected && (
-                <span style={{ fontSize: 12, color: "var(--text2)", fontFamily: "var(--mono)" }}>
-                  Balance: <strong style={{ color: "var(--text1)" }}>{balOut.toFixed(4)}</strong>
-                </span>
-              )}
+              {wallet.connected && <span style={{ fontSize: 12, color: "var(--text2)", fontFamily: "var(--mono)" }}>Balance: <strong style={{ color: "var(--text1)" }}>{balOut.toFixed(4)}</strong></span>}
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <div style={{ flex: 1, fontSize: 28, fontWeight: 700, fontFamily: "var(--mono)", color: estimating ? "var(--text2)" : estimate?.estimatedAmountOut ? "var(--green)" : "var(--text2)" }}>
-                {estimating ? "…" : estimate?.estimatedAmountOut ?? "0.0"}
+              <div style={{ flex: 1, fontSize: 28, fontWeight: 700, fontFamily: "var(--mono)", color: estimating ? "var(--text2)" : estimate ? "var(--green)" : "var(--text2)" }}>
+                {estimating ? "…" : estimate?.amtOut ?? "0.0"}
               </div>
-              <TokenSelector label="" name="tokenOut" value={tokenOut} onChange={t => { setTokenOut(t); setResult(null); setEstimate(null); }} />
+              <div style={{ padding: "6px 12px", borderRadius: 20, border: "1px solid var(--cyan)", background: "rgba(0,229,255,0.1)", color: "var(--cyan)", fontWeight: 700, fontSize: 13 }}>{tokenOut}</div>
             </div>
           </div>
 
-          {/* Rate row */}
+          {/* Rate + impact */}
           {estimate && !estimating && (
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 12, fontFamily: "var(--mono)", color: "var(--text2)" }}>
-              <span>1 {tokenIn.symbol} = {estimate.exchangeRate} {tokenOut.symbol}</span>
-              <span style={{ color: impactColor(estimate.priceImpact) }}>
-                Impact: {estimate.priceImpact}%
-              </span>
+              <span>1 {tokenIn} = {estimate.rate} {tokenOut}</span>
+              <span style={{ color: impactColor(estimate.impact) }}>Impact: {estimate.impact}%</span>
             </div>
           )}
 
@@ -194,55 +302,31 @@ export default function SwapPage() {
           )}
 
           {/* Button */}
-          {!wallet.connected ? (
-            <button type="button" onClick={openModal} className="swap-btn connect-state">Connect Wallet</button>
-          ) : (
-            <button
-              type="submit"
-              disabled={loading || !amtNum || tokenIn.symbol === tokenOut.symbol}
-              className={loading || !amtNum ? "swap-btn disabled-state" : "swap-btn ready"}
-              style={{ margin: 0 }}
-            >
-              {loading && <span className="spinner" />}
-              {loading ? "Swapping…" : amtNum > 0 ? `Swap ${tokenIn.symbol} → ${tokenOut.symbol}` : "Enter amount"}
-            </button>
-          )}
+          {!wallet.connected
+            ? <button type="button" onClick={openModal} className="swap-btn connect-state">Connect Wallet</button>
+            : <button type="submit" disabled={loading || !amtNum} className={loading || !amtNum ? "swap-btn disabled-state" : "swap-btn ready"} style={{ margin: 0 }}>
+                {loading && <span className="spinner" />}
+                {loading ? "Swapping…" : amtNum > 0 ? `Swap ${amtNum} ${tokenIn} → ${tokenOut}` : "Enter amount"}
+              </button>
+          }
         </form>
       </div>
 
       {/* Result */}
       {result && (
-        <div
-          className="fade-in"
-          style={{ marginTop: 14, background: "var(--bg1)", border: `1px solid ${result.success ? "rgba(0,200,150,0.3)" : "rgba(224,65,90,0.3)"}`, borderRadius: 16, padding: "16px 18px" }}
-        >
+        <div className="fade-in" style={{ marginTop: 14, background: "var(--bg1)", border: `1px solid ${result.success ? "rgba(0,200,150,0.3)" : "rgba(224,65,90,0.3)"}`, borderRadius: 16, padding: "16px 18px" }}>
           {result.success ? (
             <>
-              <p style={{ fontWeight: 700, fontSize: 13, color: "var(--green)", marginBottom: 6 }}>
-                ✅ Swap Confirmed — TRANSFER EXECUTED
+              <p style={{ fontWeight: 700, fontSize: 13, color: "var(--green)", marginBottom: 8 }}>✅ Swap Confirmed</p>
+              <p style={{ fontSize: 13, fontFamily: "var(--mono)", marginBottom: 6 }}>
+                Received: <strong style={{ color: "var(--green)" }}>~{result.amountOut} {tokenOut}</strong>
               </p>
-              <div style={{ fontSize: 13, fontFamily: "var(--mono)", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
-                <div style={{ width: 22, height: 22, borderRadius: "50%", background: "#2775CA", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, fontWeight: 700, color: "#fff" }}>
-                  {tokenIn.symbol.slice(0,2).toUpperCase()}
-                </div>
-                <strong style={{ color: "var(--text1)" }}>{amountIn} {tokenIn.symbol}</strong>
-                <span style={{ color: "var(--text2)" }}>→</span>
-                <div style={{ width: 22, height: 22, borderRadius: "50%", background: "#627EEA", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, fontWeight: 700, color: "#fff" }}>
-                  {tokenOut.symbol.slice(0,2).toUpperCase()}
-                </div>
-                <strong style={{ color: "var(--cyan)" }}>{result.amountOut ?? estimate?.estimatedAmountOut ?? "?"} {tokenOut.symbol}</strong>
-              </div>
               {result.txHash && (
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <span style={{ fontSize: 11, color: "var(--text2)", fontFamily: "var(--mono)" }}>TX: {result.txHash.slice(0,14)}…{result.txHash.slice(-6)}</span>
-                  <a
-                    href={`${ARC_EXPLORER}/tx/${result.txHash}`}
-                    target="_blank" rel="noopener noreferrer"
-                    style={{ fontSize: 11, color: "var(--cyan)", textDecoration: "none" }}
-                  >View on Explorer ↗</a>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, fontFamily: "var(--mono)" }}>
+                  <span style={{ color: "var(--text2)" }}>TX: {result.txHash.slice(0,14)}…{result.txHash.slice(-6)}</span>
+                  <a href={`${ARC_EXPLORER}/tx/${result.txHash}`} target="_blank" rel="noopener noreferrer" style={{ color: "var(--cyan)", textDecoration: "none" }}>View on Explorer ↗</a>
                 </div>
               )}
-              <p style={{ fontSize: 11, color: "var(--green)", marginTop: 6 }}>✓ Confirmed</p>
             </>
           ) : (
             <>
@@ -250,19 +334,6 @@ export default function SwapPage() {
               <p style={{ fontSize: 12, color: "var(--text2)", fontFamily: "var(--mono)", lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{result.error}</p>
             </>
           )}
-        </div>
-      )}
-
-      {/* Recent TX placeholder */}
-      {!result && (
-        <div style={{ marginTop: 14, background: "var(--bg1)", border: "1px solid var(--border)", borderRadius: 16, padding: "16px 18px" }}>
-          <p style={{ fontSize: 12, color: "var(--text2)", display: "flex", alignItems: "center", gap: 6 }}>
-            <span style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--text2)", display: "inline-block" }} />
-            <strong>Recent Transaction</strong>
-          </p>
-          <p style={{ fontSize: 11, color: "var(--text2)", fontFamily: "var(--mono)", marginTop: 4, lineHeight: 1.6 }}>
-            Your most recent transaction will appear here. Each new TX replaces the previous one.
-          </p>
         </div>
       )}
     </div>

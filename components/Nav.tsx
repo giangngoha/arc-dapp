@@ -6,7 +6,7 @@ import { useWallet, getBal } from "./WalletProvider";
 import WalletModal from "./WalletModal";
 
 const LINKS = [
-  { href:"/",       label:"Exchange"    },
+  { href:"/swap",    label:"Exchange"    },
   { href:"/pool",   label:"Pools"       },
   { href:"/bridge", label:"Bridge"      },
   { href:"/send",   label:"Send Tokens" },
@@ -66,9 +66,9 @@ export default function Nav() {
     <>
     <nav>
       <div className="logo-wrap">
-        <div className="logo-box">M</div>
+        <div className="logo-box">A</div>
         <div>
-          <div className="logo-name">Matrix</div>
+          <div className="logo-name">Arc Dapp</div>
           <a className="logo-faucet" href="https://faucet.circle.com/" target="_blank" rel="noopener noreferrer">FAUCET ↗</a>
         </div>
       </div>

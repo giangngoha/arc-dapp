@@ -35,3 +35,12 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+#debug
+debug_swap.mjs
+debug_swap2.mjs
+debug_swap3.mjs
+debug_uniswap.mjs
+debug_swap_uniswap.mjs
+debug_approve.mjs
+check_tx.mjs
