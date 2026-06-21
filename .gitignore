@@ -59,5 +59,7 @@ deploy_uniswap.mjs
 deploy_uniswap_update.mjs
 deploy_simple.mjs
 deploy_maxgas.mjs
+deploy_v2.mjs
 
+#pool
 my_pool_addresses.json
