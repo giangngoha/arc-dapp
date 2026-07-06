@@ -5,8 +5,8 @@ import { showToast } from "@/components/Toast";
 import { ARC_EXPLORER, CONTRACTS, toUnits, encodeApprove, encodeAllowance } from "@/lib/contracts";
 
 // ─── Uniswap V2 on Arc Testnet (deployed by osr21/arc-swap) ──────────────────
-const ROUTER   = "0xe27d5d256b370604f1ff060fb489c6a8e3f8a6d9";
-const PAIR     = "0xb3685D16AAa06361ED28377b1319136650Fa9A13";
+const ROUTER   = "0x29E0C2A0780196792dECc9183Dd5aA540c955BDf";
+const PAIR     = "0x5eFf76b80A58ea34b23d0981bCCe2E639171c9cb";
 const USDC     = CONTRACTS.USDC;
 const EURC     = CONTRACTS.EURC;
 const MAX_U256 = BigInt("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
