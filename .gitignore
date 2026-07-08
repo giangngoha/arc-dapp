@@ -63,3 +63,6 @@ deploy_v2.mjs
 
 #pool
 my_pool_addresses.json
+
+add_liquidity.mjs
+rebalance_pool.mjs

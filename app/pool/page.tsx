@@ -104,7 +104,7 @@ interface PoolInfo {
   userEURC: number;
 }
 
-type Tab = "overview" | "add" | "remove";
+type Tab = "add" | "remove";
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
 function TI({ sym, bg, size = 26 }: { sym: string; bg: string; size?: number }) {
@@ -122,7 +122,7 @@ function IR({ k, v, green, mono }: { k: string; v: string; green?: boolean; mono
 
 export default function PoolPage() {
   const { wallet, openModal, refreshBalances } = useWallet();
-  const [tab, setTab]       = useState<Tab>("overview");
+  const [tab, setTab]       = useState<Tab>("add");
   const [poolInfo, setPool] = useState<PoolInfo | null>(null);
   const [loadingPool, setLoadingPool] = useState(false);
   const [a0, setA0]         = useState("");  // USDC amount
@@ -371,28 +371,9 @@ export default function PoolPage() {
 
       {/* Tabs */}
       <div style={{ display: "flex", background: "var(--bg1)", border: "1px solid var(--border)", borderRadius: 12, overflow: "hidden", marginBottom: 20 }}>
-        {TB("overview", "Overview")}
         {TB("add", "Add Liquidity")}
         {TB("remove", "Remove")}
       </div>
-
-      {/* ── OVERVIEW TAB ── */}
-      {tab === "overview" && (
-        <div className="fade-in" style={{ background: "var(--bg1)", border: "1px solid var(--border)", borderRadius: 16, padding: "18px 20px" }}>
-          <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 12 }}>About this pool</div>
-          {[
-            ["Contract (Pair)", `${PAIR.slice(0, 10)}…${PAIR.slice(-6)}`],
-            ["Router", `${ROUTER.slice(0, 10)}…${ROUTER.slice(-6)}`],
-            ["Fee tier", "0.3%"],
-            ["Network", "Arc Testnet (chain 5042002)"],
-            ["LP token decimals", "18"],
-          ].map(([k, v]) => <IR key={k} k={k} v={v} mono />)}
-          <div style={{ marginTop: 14, display: "flex", gap: 8 }}>
-            <a href={`${ARC_EXPLORER}/address/${PAIR}`} target="_blank" rel="noopener noreferrer" style={{ fontSize: 12, color: "var(--cyan)", textDecoration: "none", fontFamily: "var(--mono)" }}>View Pair ↗</a>
-            <a href={`${ARC_EXPLORER}/address/${ROUTER}`} target="_blank" rel="noopener noreferrer" style={{ fontSize: 12, color: "var(--cyan)", textDecoration: "none", fontFamily: "var(--mono)", marginLeft: 12 }}>View Router ↗</a>
-          </div>
-        </div>
-      )}
 
       {/* ── ADD LIQUIDITY TAB ── */}
       {tab === "add" && (

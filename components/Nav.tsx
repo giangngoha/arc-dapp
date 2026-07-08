@@ -13,9 +13,9 @@ const LINKS = [
 ];
 
 const CHAINS = [
-  { id:"arc",     label:"Arc Testnet", hex:"0x4cef52", dot:"#00b4d8", rpc:"https://rpc.testnet.arc.network",              explorer:"https://testnet.arcscan.app",  nativeCurrency:{name:"USDC",symbol:"USDC",decimals:18} },
-  { id:"sepolia", label:"Eth Sepolia", hex:"0xaa36a7", dot:"#627EEA", rpc:"https://ethereum-sepolia-rpc.publicnode.com", explorer:"https://sepolia.etherscan.io", nativeCurrency:{name:"ETH",symbol:"ETH",decimals:18}  },
-  { id:"fuji",    label:"Avax Fuji",   hex:"0xa869",   dot:"#E84142", rpc:"https://api.avax-test.network/ext/bc/C/rpc",  explorer:"https://testnet.snowtrace.io", nativeCurrency:{name:"AVAX",symbol:"AVAX",decimals:18} },
+  { id:"arc",     label:"Arc Testnet", hex:"0x4cef52", dot:"#00b4d8", rpc:"https://rpc.testnet.arc.network",              explorer:"https://testnet.arcscan.app",        nativeCurrency:{name:"USDC",symbol:"USDC",decimals:18} },
+  { id:"sepolia", label:"Eth Sepolia", hex:"0xaa36a7", dot:"#627EEA", rpc:"https://ethereum-sepolia-rpc.publicnode.com", explorer:"https://sepolia.etherscan.io",       nativeCurrency:{name:"ETH",symbol:"ETH",decimals:18}  },
+  { id:"fuji",    label:"Avax Fuji",   hex:"0xa869",   dot:"#E84142", rpc:"https://api.avax-test.network/ext/bc/C/rpc",   explorer:"https://testnet.snowtrace.io",       nativeCurrency:{name:"AVAX",symbol:"AVAX",decimals:18} },
 ];
 
 function short(a:string){ return a.slice(0,6)+"…"+a.slice(-4); }
@@ -23,28 +23,29 @@ function fmt(n:number, dec=4){ if(n===0)return "0"; if(n<0.00000001)return "<0.0
 
 export default function Nav() {
   const path = usePathname();
-  const { wallet, disconnect, openModal, refreshBalances } = useWallet();
+  const { wallet, disconnect, openModal } = useWallet();
   const [gas,        setGas]      = useState(8);
   const [menuOpen,   setMenu]     = useState(false);
   const [chainOpen,  setChainOpen]= useState(false);
-  const [refreshing, setRef]      = useState(false);
   const [currentHex, setCurrentHex] = useState<string|null>(null);
+  const [copied, setCopied] = useState(false);
   const menuRef  = useRef<HTMLDivElement>(null);
   const chainRef = useRef<HTMLDivElement>(null);
 
+  // Fetch real gas price from current chain RPC every 12 seconds
   useEffect(()=>{
-  async function fetchGas(){
-    const chain = CHAINS.find(c=>c.hex===currentHex) ?? CHAINS[0];
-    try{
-      const res = await fetch(chain.rpc,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id:1,method:"eth_gasPrice",params:[]})});
-      const j = await res.json();
-      if(j.result){ const gwei = Number(BigInt(j.result)) / 1e9; setGas(Math.round(gwei*10)/10); }
-    }catch{}
-  }
-  fetchGas();
-  const id = setInterval(fetchGas, 12000);
-  return ()=>clearInterval(id);
-},[currentHex]);
+    async function fetchGas(){
+      const chain = CHAINS.find(c=>c.hex===currentHex) ?? CHAINS[0];
+      try{
+        const res = await fetch(chain.rpc,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id:1,method:"eth_gasPrice",params:[]})});
+        const j = await res.json();
+        if(j.result){ const gwei = Number(BigInt(j.result)) / 1e9; setGas(Math.round(gwei*10)/10); }
+      }catch{}
+    }
+    fetchGas();
+    const id = setInterval(fetchGas, 12000);
+    return ()=>clearInterval(id);
+  },[currentHex]);
   useEffect(()=>{ const h=(e:MouseEvent)=>{ if(menuRef.current&&!menuRef.current.contains(e.target as Node))setMenu(false); if(chainRef.current&&!chainRef.current.contains(e.target as Node))setChainOpen(false); }; document.addEventListener("mousedown",h); return ()=>document.removeEventListener("mousedown",h); },[]);
 
   // Detect current chain from MetaMask
@@ -72,15 +73,14 @@ export default function Nav() {
 
   const activeChain = CHAINS.find(c=>c.hex===currentHex) ?? CHAINS[0];
 
-  async function handleRefresh(){ setRef(true); await refreshBalances(); setRef(false); }
 
   return (
     <>
     <nav>
       <div className="logo-wrap">
-        <div className="logo-box" style={{background:"linear-gradient(135deg,#00e5ff,#7c3aed,#ff6b6b)",boxShadow:"0 0 14px rgba(0,229,255,0.5)",fontSize:18,fontWeight:900,letterSpacing:-1}}>M</div>
+        <div className="logo-box">A</div>
         <div>
-          <div className="logo-name" style={{background:"linear-gradient(90deg,#00e5ff,#7c3aed)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",fontWeight:800}}>Matrix</div>
+          <div className="logo-name">Arc Dapp</div>
           <a className="logo-faucet" href="https://faucet.circle.com/" target="_blank" rel="noopener noreferrer">FAUCET ↗</a>
         </div>
       </div>
@@ -133,8 +133,21 @@ export default function Nav() {
             {menuOpen&&(
               <div className="wallet-menu">
                 <div className="menu-addr">
-                  <span>{wallet.walletType} · {short(wallet.address)}</span>
-                  <button onClick={handleRefresh} style={{background:"none",border:"none",cursor:"pointer",color:"var(--cyan)",fontSize:15,animation:refreshing?"spin .7s linear infinite":"none"}}>↻</button>
+                  <span style={{fontFamily:"var(--mono)",fontSize:11}}>{wallet.walletType} · {short(wallet.address)}</span>
+                  <button
+                    onClick={()=>{ navigator.clipboard.writeText(wallet.address); setCopied(true); setTimeout(()=>setCopied(false),1500); }}
+                    title="Copy address"
+                    style={{background:"none",border:"none",cursor:"pointer",color:copied?"var(--green)":"var(--text2)",padding:"2px 4px",display:"flex",alignItems:"center",transition:"color 0.2s"}}
+                  >
+                    {copied ? (
+                      <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 7l4 4 6-6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                    ) : (
+                      <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                        <rect x="4" y="1" width="9" height="9" rx="1.5" stroke="currentColor" strokeWidth="1.4"/>
+                        <rect x="1" y="4" width="9" height="9" rx="1.5" stroke="currentColor" strokeWidth="1.4" fill="var(--bg2)"/>
+                      </svg>
+                    )}
+                  </button>
                 </div>
                 {wallet.balancesLoading ? (
                   <div style={{padding:"10px 12px",fontSize:12,color:"var(--text2)",fontFamily:"var(--mono)",display:"flex",gap:6}}>
