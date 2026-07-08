@@ -4,47 +4,42 @@ import { useWallet, getBal } from "@/components/WalletProvider";
 import { showToast } from "@/components/Toast";
 import { ARC_EXPLORER, CONTRACTS, toUnits, encodeApprove, encodeAllowance } from "@/lib/contracts";
 
-// ─── Uniswap V2 on Arc Testnet (deployed by osr21/arc-swap) ──────────────────
-const ROUTER   = "0x29E0C2A0780196792dECc9183Dd5aA540c955BDf";
-const PAIR     = "0x5eFf76b80A58ea34b23d0981bCCe2E639171c9cb";
-const USDC     = CONTRACTS.USDC;
-const EURC     = CONTRACTS.EURC;
+// ─── YOUR Uniswap V2 Pool on Arc Testnet ─────────────────────────────────────
+const ROUTER = "0x29E0C2A0780196792dECc9183Dd5aA540c955BDf";
+const PAIR   = "0x5eFf76b80A58ea34b23d0981bCCe2E639171c9cb";
 const MAX_U256 = BigInt("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+const GAS_APPROVE = "0x186A0";
+const GAS_SWAP    = "0x493E0";
 
-// Arc Testnet quirk: eth_estimateGas is broken — use explicit gas limits
-const GAS_APPROVE = "0x186A0";   // 100,000
-const GAS_SWAP    = "0x3D090";   // 250,000
+// Known tokens
+const KNOWN_TOKENS: Record<string, { address: string; decimals: number; color: string; label: string }> = {
+  USDC:   { address: CONTRACTS.USDC,   decimals: 6, color: "#2775CA", label: "USDC"   },
+  EURC:   { address: CONTRACTS.EURC,   decimals: 6, color: "#2B5EDD", label: "EURC"   },
+  cirBTC: { address: CONTRACTS.cirBTC, decimals: 8, color: "#F7931A", label: "cirBTC" },
+};
 
-// getAmountsOut(uint256 amountIn, address[] path) → uint256[]
-function encodeGetAmountsOut(amtIn: bigint, tokenIn: string, tokenOut: string): string {
-  const sel    = "0xd06ca61f";
-  const offset = (64).toString(16).padStart(64, "0"); // offset to array
-  const len    = (2).toString(16).padStart(64, "0");  // 2 addresses
-  const a0     = tokenIn.toLowerCase().replace("0x","").padStart(64,"0");
-  const a1     = tokenOut.toLowerCase().replace("0x","").padStart(64,"0");
-  return sel + amtIn.toString(16).padStart(64,"0") + offset + len + a0 + a1;
+function encodeGetAmountsOut(amtIn: bigint, t0: string, t1: string): string {
+  const sel = "0xd06ca61f";
+  const off = (64).toString(16).padStart(64, "0");
+  const len = (2).toString(16).padStart(64, "0");
+  const a0  = t0.toLowerCase().replace("0x","").padStart(64,"0");
+  const a1  = t1.toLowerCase().replace("0x","").padStart(64,"0");
+  return sel + amtIn.toString(16).padStart(64,"0") + off + len + a0 + a1;
 }
 
-// swapExactTokensForTokens(uint256 amountIn, uint256 amountOutMin, address[] path, address to, uint256 deadline)
-function encodeSwap(amtIn: bigint, amtOutMin: bigint, tokenIn: string, tokenOut: string, to: string, deadline: bigint): string {
-  const sel     = "0x38ed1739";
-  const pathOff = (5 * 32).toString(16).padStart(64,"0"); // offset: after 5 fixed params
-  const len     = (2).toString(16).padStart(64,"0");
-  const a0      = tokenIn.toLowerCase().replace("0x","").padStart(64,"0");
-  const a1      = tokenOut.toLowerCase().replace("0x","").padStart(64,"0");
-  return (
-    sel +
+function encodeSwap(amtIn: bigint, amtOutMin: bigint, t0: string, t1: string, to: string, deadline: bigint): string {
+  const pathOff = (5*32).toString(16).padStart(64,"0");
+  const len = (2).toString(16).padStart(64,"0");
+  const a0  = t0.toLowerCase().replace("0x","").padStart(64,"0");
+  const a1  = t1.toLowerCase().replace("0x","").padStart(64,"0");
+  return "0x38ed1739" +
     amtIn.toString(16).padStart(64,"0") +
     amtOutMin.toString(16).padStart(64,"0") +
     pathOff +
     to.toLowerCase().replace("0x","").padStart(64,"0") +
     deadline.toString(16).padStart(64,"0") +
-    len + a0 + a1
-  );
+    len + a0 + a1;
 }
-
-// getReserves() → (uint112,uint112,uint32)
-function encodeGetReserves(): string { return "0x0902f1ac"; }
 
 async function rpcCall(method: string, params: unknown[]): Promise<unknown> {
   const res = await fetch("https://rpc.testnet.arc.network", {
@@ -73,93 +68,149 @@ async function switchToArc() {
   }
 }
 
-async function waitTx(hash: string, maxMs = 90000): Promise<boolean> {
+async function waitTx(hash: string, maxWait = 90000): Promise<boolean> {
   const start = Date.now();
-  while (Date.now() - start < maxMs) {
+  while (Date.now() - start < maxWait) {
     await new Promise(r => setTimeout(r, 3000));
     try {
       const r: any = await rpcCall("eth_getTransactionReceipt", [hash]);
-      if (r && r.blockNumber) {
-        // Got receipt - check status
-        return r.status === "0x1" || r.status === 1;
-      }
+      if (r && r.blockNumber) return r.status === "0x1" || r.status === 1;
     } catch {}
   }
   return false;
 }
 
+// Token selector dropdown
+function TokenDropdown({ value, onChange, exclude }: {
+  value: string; onChange: (sym: string, addr: string) => void; exclude?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [custom, setCustom] = useState("");
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const h = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, []);
+
+  const tok = KNOWN_TOKENS[value];
+  const isCustom = !tok;
+
+  return (
+    <div ref={ref} style={{ position: "relative", flexShrink: 0 }}>
+      <button type="button" onClick={() => setOpen(o => !o)}
+        style={{ display: "flex", alignItems: "center", gap: 7, padding: "7px 12px", borderRadius: 20, border: "1px solid var(--border)", background: "var(--bg3)", cursor: "pointer", minWidth: 100 }}>
+        {tok && <div style={{ width: 20, height: 20, borderRadius: "50%", background: tok.color, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, fontWeight: 700, color: "#fff" }}>{tok.label.slice(0,2).toUpperCase()}</div>}
+        <span style={{ fontSize: 13, fontWeight: 700, color: "var(--text1)" }}>{isCustom ? value.slice(0,6)+"…" : value}</span>
+        <svg width="8" height="5" viewBox="0 0 10 6" fill="none"><path d="M1 1l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
+      </button>
+
+      {open && (
+        <div style={{ position: "absolute", top: "calc(100% + 6px)", right: 0, background: "var(--bg1)", border: "1px solid var(--border)", borderRadius: 12, minWidth: 180, zIndex: 200, boxShadow: "0 8px 24px rgba(0,0,0,0.4)", overflow: "hidden" }}>
+          {Object.entries(KNOWN_TOKENS).filter(([sym]) => sym !== exclude).map(([sym, t]) => (
+            <button key={sym} type="button"
+              onClick={() => { onChange(sym, t.address); setOpen(false); }}
+              style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "10px 14px", border: "none", background: value === sym ? "var(--bg2)" : "transparent", cursor: "pointer", textAlign: "left" }}
+              onMouseEnter={e => (e.currentTarget.style.background = "var(--bg2)")}
+              onMouseLeave={e => (e.currentTarget.style.background = value === sym ? "var(--bg2)" : "transparent")}>
+              <div style={{ width: 24, height: 24, borderRadius: "50%", background: t.color, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, fontWeight: 700, color: "#fff" }}>{t.label.slice(0,2).toUpperCase()}</div>
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text1)" }}>{sym}</div>
+                <div style={{ fontSize: 10, color: "var(--text2)" }}>{t.address.slice(0,10)}…</div>
+              </div>
+              {value === sym && <span style={{ marginLeft: "auto", color: "var(--cyan)", fontSize: 12 }}>✓</span>}
+            </button>
+          ))}
+          {/* Custom token */}
+          <div style={{ padding: "8px 14px", borderTop: "1px solid var(--border)" }}>
+            <p style={{ fontSize: 10, color: "var(--text2)", marginBottom: 6, fontFamily: "var(--mono)" }}>Custom contract address</p>
+            <div style={{ display: "flex", gap: 6 }}>
+              <input value={custom} onChange={e => setCustom(e.target.value)} placeholder="0x..."
+                style={{ flex: 1, background: "var(--bg2)", border: "1px solid var(--border)", borderRadius: 8, padding: "5px 8px", fontSize: 11, color: "var(--text1)", outline: "none", fontFamily: "var(--mono)" }} />
+              <button type="button"
+                onClick={() => { if (custom.startsWith("0x") && custom.length === 42) { onChange(custom, custom); setOpen(false); setCustom(""); } }}
+                style={{ padding: "5px 10px", borderRadius: 8, border: "none", background: "var(--cyan)", color: "#000", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+                Add
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function SwapPage() {
   const { wallet, openModal, refreshBalances } = useWallet();
-  const [tokenIn,  setTokenIn]  = useState<"USDC"|"EURC">("USDC");
-  const [amountIn, setAmountIn] = useState("");
-  const [estimate, setEstimate] = useState<{ amtOut: string; rate: string; impact: string } | null>(null);
+  const [tokenIn,    setTokenIn]    = useState<string>("USDC");
+  const [tokenInAddr, setTokenInAddr] = useState<string>(CONTRACTS.USDC);
+  const [tokenOut,   setTokenOut]   = useState<string>("EURC");
+  const [tokenOutAddr, setTokenOutAddr] = useState<string>(CONTRACTS.EURC);
+  const [amountIn,   setAmountIn]   = useState("");
+  const [estimate,   setEstimate]   = useState<{ amtOut: string; rate: string } | null>(null);
   const [estimating, setEstimating] = useState(false);
-  const [loading,  setLoading]  = useState(false);
-  const [status,   setStatus]   = useState("");
-  const [result,   setResult]   = useState<{ success: boolean; txHash?: string; amountOut?: string; error?: string } | null>(null);
-  const [slippage, setSlippage] = useState(0.5);
-  const [reserves, setReserves] = useState<{ usdc: number; eurc: number } | null>(null);
-  const debounce = useRef<ReturnType<typeof setTimeout>|null>(null);
+  const [loading,    setLoading]    = useState(false);
+  const [status,     setStatus]     = useState("");
+  const [result,     setResult]     = useState<{ success: boolean; txHash?: string; amountOut?: string; error?: string } | null>(null);
+  const [slippage,   setSlippage]   = useState(0.5);
+  const [rate,       setRate]       = useState<string | null>(null);
+  const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const tokenOut = tokenIn === "USDC" ? "EURC" : "USDC";
-  const tokenInAddr  = tokenIn  === "USDC" ? USDC : EURC;
-  const tokenOutAddr = tokenOut === "USDC" ? USDC : EURC;
+  const decimalsIn  = KNOWN_TOKENS[tokenIn]?.decimals  ?? 6;
+  const decimalsOut = KNOWN_TOKENS[tokenOut]?.decimals ?? 6;
   const balIn  = wallet.connected ? getBal(wallet.balances, tokenIn)  : 0;
   const balOut = wallet.connected ? getBal(wallet.balances, tokenOut) : 0;
   const amtNum = parseFloat(amountIn) || 0;
 
-  // Load reserves from pair contract
+  // Fetch rate from pool
   useEffect(() => {
-    rpcCall("eth_call", [{ to: PAIR, data: encodeGetReserves() }, "latest"])
+    rpcCall("eth_call", [{ to: PAIR, data: "0x0902f1ac" }, "latest"])
       .then((r: any) => {
         if (!r || r === "0x") return;
         const hex = r.replace("0x","");
-        // getReserves returns (reserve0, reserve1, blockTimestamp) each padded to 32 bytes
-        // reserve0 = USDC (first token in pair), reserve1 = EURC
         const r0 = parseInt(hex.slice(0,64), 16) / 1e6;
         const r1 = parseInt(hex.slice(64,128), 16) / 1e6;
-        setReserves({ usdc: r0, eurc: r1 });
+        if (r0 > 0) setRate(`1 USDC ≈ ${(r1/r0).toFixed(4)} EURC`);
       }).catch(() => {});
   }, []);
 
-  // Auto-estimate via getAmountsOut
+  // Auto-estimate
   useEffect(() => {
-    if (!amtNum || amtNum <= 0) { setEstimate(null); return; }
+    if (!amtNum || amtNum <= 0 || tokenInAddr.toLowerCase() === tokenOutAddr.toLowerCase()) { setEstimate(null); return; }
     if (debounce.current) clearTimeout(debounce.current);
     debounce.current = setTimeout(async () => {
       setEstimating(true);
       try {
-        const amtInRaw = toUnits(amtNum, 6);
+        const amtInRaw = toUnits(amtNum, decimalsIn);
         const data = encodeGetAmountsOut(amtInRaw, tokenInAddr, tokenOutAddr);
         const r: any = await rpcCall("eth_call", [{ to: ROUTER, data }, "latest"]);
         if (!r || r === "0x") { setEstimate(null); return; }
         const hex = r.replace("0x","");
-        // Returns: [offset(32), length(32), amounts[0](32), amounts[1](32)]
         const amtOutRaw = BigInt("0x" + hex.slice(192, 256));
-        const amtOut = Number(amtOutRaw) / 1e6;
-        const rate = (amtOut / amtNum).toFixed(6);
-        const impact = (Math.abs(1 - amtOut / amtNum) * 100).toFixed(2);
-        setEstimate({ amtOut: amtOut.toFixed(6), rate, impact });
+        const amtOut = Number(amtOutRaw) / 10 ** decimalsOut;
+        const rateVal = amtNum > 0 ? (amtOut / amtNum).toFixed(6) : "—";
+        setEstimate({ amtOut: amtOut.toFixed(6), rate: rateVal });
       } catch { setEstimate(null); }
       finally { setEstimating(false); }
     }, 500);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [amountIn, tokenIn]);
+  }, [amountIn, tokenIn, tokenOut]);
 
   async function handleSwap(e: React.FormEvent) {
     e.preventDefault();
     if (!wallet.connected) { openModal(); return; }
-    if (!amtNum) return;
+    if (!amtNum || tokenInAddr.toLowerCase() === tokenOutAddr.toLowerCase()) return;
     setLoading(true); setStatus(""); setResult(null);
     const eth = (window as any).ethereum;
     try {
       await switchToArc();
-      const amtInRaw   = toUnits(amtNum, 6);
-      const amtOutNum  = estimate ? parseFloat(estimate.amtOut) : amtNum * 0.9;
-      const amtOutMin  = toUnits(amtOutNum * (1 - slippage / 100), 6);
-      const deadline   = BigInt(Math.floor(Date.now() / 1000) + 1200); // 20 min
+      const amtInRaw  = toUnits(amtNum, decimalsIn);
+      const amtOutNum = estimate ? parseFloat(estimate.amtOut) : amtNum * 0.9;
+      const amtOutMin = toUnits(amtOutNum * (1 - slippage / 100), decimalsOut);
+      const deadline  = BigInt(Math.floor(Date.now() / 1000) + 1200);
 
-      // ── 1. Check & approve Router ──
+      // Check & approve
       setStatus("Checking allowance…");
       const allowRaw: any = await rpcCall("eth_call", [{ to: tokenInAddr, data: encodeAllowance(wallet.address, ROUTER) }, "latest"]);
       const allowance = allowRaw && allowRaw !== "0x" ? BigInt(allowRaw) : 0n;
@@ -170,19 +221,12 @@ export default function SwapPage() {
           method: "eth_sendTransaction",
           params: [{ from: wallet.address, to: tokenInAddr, data: encodeApprove(ROUTER, MAX_U256), gas: GAS_APPROVE }],
         });
-        setStatus("Waiting for approval to confirm on Arc…");
+        setStatus("Waiting for approval…");
         const approveOk = await waitTx(approveTx, 90000);
-        if (!approveOk) throw new Error(`Approve TX not confirmed. Hash: ${approveTx}`);
-        // Extra wait for Arc to process state change
-        setStatus("Approve confirmed, preparing swap…");
-        await new Promise(r => setTimeout(r, 3000));
-        // Verify allowance actually updated
-        const newAllowRaw: any = await rpcCall("eth_call", [{ to: tokenInAddr, data: encodeAllowance(wallet.address, ROUTER) }, "latest"]);
-        const newAllow = newAllowRaw && newAllowRaw !== "0x" ? BigInt(newAllowRaw) : 0n;
-        if (newAllow < amtInRaw) throw new Error(`Allowance not updated after approve. Got: ${Number(newAllow)/1e6}, needed: ${amtNum}`);
+        if (!approveOk) throw new Error("Approve failed.");
+        await new Promise(r => setTimeout(r, 2000));
       }
 
-      // ── 2. swapExactTokensForTokens ──
       setStatus(`Swapping ${tokenIn} → ${tokenOut} — confirm in wallet…`);
       const swapData = encodeSwap(amtInRaw, amtOutMin, tokenInAddr, tokenOutAddr, wallet.address, deadline);
       const swapTx: string = await eth.request({
@@ -210,23 +254,19 @@ export default function SwapPage() {
     } finally { setLoading(false); setStatus(""); }
   }
 
-  const impactColor = (v: string) => {
-    const n = parseFloat(v);
-    return n < 1 ? "var(--green)" : n < 3 ? "#f59e0b" : "var(--red)";
-  };
-
   return (
     <div style={{ maxWidth: 480, margin: "0 auto" }}>
+      {/* Header */}
       <div style={{ marginBottom: 20, display: "flex", alignItems: "center", gap: 12 }}>
-        <div style={{ width: 40, height: 40, borderRadius: 12, background: "rgba(0,200,150,0.15)", border: "1px solid rgba(0,200,150,0.3)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20 }}>🔄</div>
+        <div style={{ width: 42, height: 42, borderRadius: 12, background: "linear-gradient(135deg,#00e5ff,#0066ff)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, fontWeight: 900, color: "#fff", boxShadow: "0 0 16px rgba(0,229,255,0.4)" }}>🔄</div>
         <div>
           <h1 style={{ fontSize: 22, fontWeight: 800, margin: 0 }}>Swap Exchange</h1>
-          <p style={{ fontSize: 12, color: "var(--text2)", margin: 0 }}>Uniswap V2 AMM · Arc Testnet</p>
+          {rate && <p style={{ fontSize: 11, color: "var(--cyan)", margin: 0, fontFamily: "var(--mono)" }}>{rate}</p>}
         </div>
-        {/* Slippage selector */}
+        {/* Slippage */}
         <div style={{ marginLeft: "auto", display: "flex", gap: 4 }}>
           {[0.1, 0.5, 1.0].map(s => (
-            <button key={s} onClick={() => setSlippage(s)}
+            <button key={s} type="button" onClick={() => setSlippage(s)}
               style={{ padding: "4px 8px", borderRadius: 6, border: "1px solid", borderColor: slippage===s ? "var(--cyan)" : "var(--border)", background: slippage===s ? "rgba(0,229,255,0.1)" : "var(--bg2)", color: slippage===s ? "var(--cyan)" : "var(--text2)", fontSize: 11, cursor: "pointer", fontFamily: "var(--mono)", fontWeight: 700 }}>
               {s}%
             </button>
@@ -234,65 +274,58 @@ export default function SwapPage() {
         </div>
       </div>
 
-      {/* Pool reserves */}
-      {reserves && (
-        <div style={{ background: "var(--bg2)", border: "1px solid var(--border)", borderRadius: 10, padding: "8px 14px", marginBottom: 12, display: "flex", gap: 20, fontSize: 11, fontFamily: "var(--mono)", color: "var(--text2)" }}>
-          <span>Pool: <strong style={{ color: "var(--text1)" }}>{reserves.usdc.toFixed(2)} USDC</strong></span>
-          <span>/ <strong style={{ color: "var(--text1)" }}>{reserves.eurc.toFixed(2)} EURC</strong></span>
-          <span style={{ marginLeft: "auto" }}>Rate: 1 USDC ≈ {(reserves.eurc / reserves.usdc).toFixed(4)} EURC</span>
-        </div>
-      )}
-
       <div style={{ background: "var(--bg1)", border: "1px solid var(--border)", borderRadius: 20, padding: "20px 20px 16px" }}>
         <form onSubmit={handleSwap}>
-          {/* Sell box */}
+          {/* FROM */}
           <div style={{ background: "var(--bg2)", border: "1px solid var(--border)", borderRadius: 14, padding: "14px 16px", marginBottom: 8 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
-              <span style={{ fontSize: 12, color: "var(--text2)", fontWeight: 600 }}>Sell (From)</span>
-              {wallet.connected && <span style={{ fontSize: 12, color: "var(--cyan)", cursor: "pointer", fontFamily: "var(--mono)" }} onClick={() => setAmountIn(balIn.toFixed(2))}>Balance: <strong>{balIn.toFixed(4)}</strong></span>}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+              <span style={{ fontSize: 12, color: "var(--text2)", fontWeight: 600 }}>From</span>
+              {wallet.connected && (
+                <span style={{ fontSize: 12, color: "var(--cyan)", cursor: "pointer", fontFamily: "var(--mono)" }}
+                  onClick={() => setAmountIn(balIn.toFixed(4))}>
+                  Balance: <strong>{balIn.toFixed(4)}</strong>
+                </span>
+              )}
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <input type="number" placeholder="0.0" step="0.01" min="0" value={amountIn}
+              <input type="number" placeholder="0.0" step="any" min="0" value={amountIn}
                 onChange={e => { setAmountIn(e.target.value); setResult(null); }}
                 style={{ flex: 1, background: "none", border: "none", outline: "none", fontSize: 28, fontWeight: 700, color: "var(--text0)", fontFamily: "var(--mono)", minWidth: 0 }} />
-              <div style={{ display: "flex", gap: 6 }}>
-                {(["USDC","EURC"] as const).map(t => (
-                  <button key={t} type="button" onClick={() => { if(tokenIn!==t){setTokenIn(t);setAmountIn("");setEstimate(null);setResult(null);}}}
-                    style={{ padding: "6px 12px", borderRadius: 20, border: "1px solid", borderColor: tokenIn===t ? "var(--cyan)" : "var(--border)", background: tokenIn===t ? "rgba(0,229,255,0.1)" : "var(--bg3)", color: tokenIn===t ? "var(--cyan)" : "var(--text1)", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>
-                    {t}
-                  </button>
-                ))}
-              </div>
+              <TokenDropdown value={tokenIn} exclude={tokenOut}
+                onChange={(sym, addr) => { setTokenIn(sym); setTokenInAddr(addr); setResult(null); setEstimate(null); }} />
             </div>
           </div>
 
           {/* Flip */}
           <div style={{ display: "flex", justifyContent: "center", margin: "4px 0" }}>
-            <button type="button" onClick={() => { setTokenIn(tokenOut as "USDC"|"EURC"); setAmountIn(""); setEstimate(null); setResult(null); }}
+            <button type="button"
+              onClick={() => { setTokenIn(tokenOut); setTokenInAddr(tokenOutAddr); setTokenOut(tokenIn); setTokenOutAddr(tokenInAddr); setAmountIn(""); setEstimate(null); setResult(null); }}
               style={{ width: 36, height: 36, borderRadius: 10, border: "1px solid var(--border)", background: "var(--bg1)", color: "var(--cyan)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18, fontWeight: 700 }}>⇅</button>
           </div>
 
-          {/* Buy box */}
+          {/* TO */}
           <div style={{ background: "var(--bg2)", border: "1px solid var(--border)", borderRadius: 14, padding: "14px 16px", marginBottom: 14 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
-              <span style={{ fontSize: 12, color: "var(--text2)", fontWeight: 600 }}>Buy (To)</span>
-              {wallet.connected && <span style={{ fontSize: 12, color: "var(--text2)", fontFamily: "var(--mono)" }}>Balance: <strong style={{ color: "var(--text1)" }}>{balOut.toFixed(4)}</strong></span>}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+              <span style={{ fontSize: 12, color: "var(--text2)", fontWeight: 600 }}>To</span>
+              {wallet.connected && (
+                <span style={{ fontSize: 12, color: "var(--text2)", fontFamily: "var(--mono)" }}>
+                  Balance: <strong style={{ color: "var(--text1)" }}>{balOut.toFixed(4)}</strong>
+                </span>
+              )}
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
               <div style={{ flex: 1, fontSize: 28, fontWeight: 700, fontFamily: "var(--mono)", color: estimating ? "var(--text2)" : estimate ? "var(--green)" : "var(--text2)" }}>
                 {estimating ? "…" : estimate?.amtOut ?? "0.0"}
               </div>
-              <div style={{ padding: "6px 12px", borderRadius: 20, border: "1px solid var(--cyan)", background: "rgba(0,229,255,0.1)", color: "var(--cyan)", fontWeight: 700, fontSize: 13 }}>{tokenOut}</div>
+              <TokenDropdown value={tokenOut} exclude={tokenIn}
+                onChange={(sym, addr) => { setTokenOut(sym); setTokenOutAddr(addr); setResult(null); setEstimate(null); }} />
             </div>
+            {estimate && !estimating && (
+              <div style={{ marginTop: 6, fontSize: 11, color: "var(--text2)", fontFamily: "var(--mono)" }}>
+                1 {tokenIn} = {estimate.rate} {tokenOut}
+              </div>
+            )}
           </div>
-
-          {/* Rate + impact */}
-          {estimate && !estimating && (
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 12, fontFamily: "var(--mono)", color: "var(--text2)" }}>
-              <span>1 {tokenIn} = {estimate.rate} {tokenOut}</span>
-              <span style={{ color: impactColor(estimate.impact) }}>Impact: {estimate.impact}%</span>
-            </div>
-          )}
 
           {/* Status */}
           {loading && status && (
@@ -304,7 +337,8 @@ export default function SwapPage() {
           {/* Button */}
           {!wallet.connected
             ? <button type="button" onClick={openModal} className="swap-btn connect-state">Connect Wallet</button>
-            : <button type="submit" disabled={loading || !amtNum} className={loading || !amtNum ? "swap-btn disabled-state" : "swap-btn ready"} style={{ margin: 0 }}>
+            : <button type="submit" disabled={loading || !amtNum || tokenInAddr === tokenOutAddr}
+                className={loading || !amtNum ? "swap-btn disabled-state" : "swap-btn ready"} style={{ margin: 0 }}>
                 {loading && <span className="spinner" />}
                 {loading ? "Swapping…" : amtNum > 0 ? `Swap ${amtNum} ${tokenIn} → ${tokenOut}` : "Enter amount"}
               </button>
@@ -318,13 +352,11 @@ export default function SwapPage() {
           {result.success ? (
             <>
               <p style={{ fontWeight: 700, fontSize: 13, color: "var(--green)", marginBottom: 8 }}>✅ Swap Confirmed</p>
-              <p style={{ fontSize: 13, fontFamily: "var(--mono)", marginBottom: 6 }}>
-                Received: <strong style={{ color: "var(--green)" }}>~{result.amountOut} {tokenOut}</strong>
-              </p>
+              {result.amountOut && <p style={{ fontSize: 13, fontFamily: "var(--mono)", marginBottom: 6 }}>Received: <strong style={{ color: "var(--green)" }}>~{result.amountOut} {tokenOut}</strong></p>}
               {result.txHash && (
                 <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, fontFamily: "var(--mono)" }}>
                   <span style={{ color: "var(--text2)" }}>TX: {result.txHash.slice(0,14)}…{result.txHash.slice(-6)}</span>
-                  <a href={`${ARC_EXPLORER}/tx/${result.txHash}`} target="_blank" rel="noopener noreferrer" style={{ color: "var(--cyan)", textDecoration: "none" }}>View on Explorer ↗</a>
+                  <a href={`${ARC_EXPLORER}/tx/${result.txHash}`} target="_blank" rel="noopener noreferrer" style={{ color: "var(--cyan)", textDecoration: "none" }}>View ↗</a>
                 </div>
               )}
             </>

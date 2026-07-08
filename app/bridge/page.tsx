@@ -12,31 +12,34 @@ const CHAINS = [
     id: "Arc_Testnet", label: "Arc Testnet", sub: "Arc (0x4cef52)", color: "#00b4d8", icon: "A",
     chainIdHex: "0x4cef52",
     usdc:        "0x3600000000000000000000000000000000000000",
-    messenger:   "0x8fe6b999dc680ccfdd5bf7eb0974218be2542daa", // TokenMessengerV2 Arc (CCTP V2)
-    transmitter: "0xe737e5cebeeba77efe34d4aa090756590b1ce275", // MessageTransmitterV2 Arc (CCTP V2)
+    messenger:   "0x8fe6b999dc680ccfdd5bf7eb0974218be2542daa",
+    transmitter: "0xe737e5cebeeba77efe34d4aa090756590b1ce275",
     rpc:         "https://rpc.testnet.arc.network",
     explorer:    "https://testnet.arcscan.app",
     domain:      26,
+    nativeCurrency: { name: "USDC", symbol: "USDC", decimals: 18 },  // thêm dòng này
   },
   {
     id: "Ethereum_Sepolia", label: "Ethereum", sub: "Sepolia Testnet", color: "#627EEA", icon: "Ξ",
     chainIdHex: "0xaa36a7",
     usdc:        "0x1c7d4b196cb0c7b01d743fbc6116a902379c7238",
-    messenger:   "0x8fe6b999dc680ccfdd5bf7eb0974218be2542daa", // TokenMessengerV2 Sepolia (CCTP V2)
-    transmitter: "0xe737e5cebeeba77efe34d4aa090756590b1ce275", // MessageTransmitterV2 Sepolia (CCTP V2)
+    messenger:   "0x8fe6b999dc680ccfdd5bf7eb0974218be2542daa",
+    transmitter: "0xe737e5cebeeba77efe34d4aa090756590b1ce275",
     rpc:         "https://ethereum-sepolia-rpc.publicnode.com",
     explorer:    "https://sepolia.etherscan.io",
     domain:      0,
+    nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 },    // thêm dòng này
   },
   {
     id: "Avalanche_Fuji", label: "Avalanche", sub: "Fuji Testnet", color: "#E84142", icon: "▲",
     chainIdHex: "0xa869",
     usdc:        "0x5425890298aed601595a70AB815c96711a31Bc65",
-    messenger:   "0x8fe6b999dc680ccfdd5bf7eb0974218be2542daa", // TokenMessengerV2 Fuji (CCTP V2)
-    transmitter: "0xe737e5cebeeba77efe34d4aa090756590b1ce275", // MessageTransmitterV2 Fuji (CCTP V2)
+    messenger:   "0x8fe6b999dc680ccfdd5bf7eb0974218be2542daa",
+    transmitter: "0xe737e5cebeeba77efe34d4aa090756590b1ce275",
     rpc:         "https://api.avax-test.network/ext/bc/C/rpc",
     explorer:    "https://testnet.snowtrace.io",
     domain:      1,
+    nativeCurrency: { name: "AVAX", symbol: "AVAX", decimals: 18 },  // thêm dòng này
   },
 ];
 type Chain = typeof CHAINS[0];
@@ -122,7 +125,7 @@ async function switchToChain(chain: Chain) {
         params: [{
           chainId: chain.chainIdHex,
           chainName: chain.label + " " + chain.sub,
-          nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 },
+          nativeCurrency: chain.nativeCurrency,
           rpcUrls: [chain.rpc],
           blockExplorerUrls: [chain.explorer],
         }],

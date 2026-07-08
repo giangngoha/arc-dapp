@@ -13,9 +13,9 @@ const LINKS = [
 ];
 
 const CHAINS = [
-  { id:"arc",     label:"Arc Testnet",    hex:"0x4cef52", dot:"#00b4d8", rpc:"https://rpc.testnet.arc.network", explorer:"https://testnet.arcscan.app" },
-  { id:"sepolia", label:"Eth Sepolia",    hex:"0xaa36a7", dot:"#627EEA", rpc:"https://rpc.sepolia.org", explorer:"https://sepolia.etherscan.io" },
-  { id:"fuji",    label:"Avax Fuji",      hex:"0xa869",   dot:"#E84142", rpc:"https://api.avax-test.network/ext/bc/C/rpc", explorer:"https://testnet.snowtrace.io" },
+  { id:"arc",     label:"Arc Testnet", hex:"0x4cef52", dot:"#00b4d8", rpc:"https://rpc.testnet.arc.network",              explorer:"https://testnet.arcscan.app",  nativeCurrency:{name:"USDC",symbol:"USDC",decimals:18} },
+  { id:"sepolia", label:"Eth Sepolia", hex:"0xaa36a7", dot:"#627EEA", rpc:"https://ethereum-sepolia-rpc.publicnode.com", explorer:"https://sepolia.etherscan.io", nativeCurrency:{name:"ETH",symbol:"ETH",decimals:18}  },
+  { id:"fuji",    label:"Avax Fuji",   hex:"0xa869",   dot:"#E84142", rpc:"https://api.avax-test.network/ext/bc/C/rpc",  explorer:"https://testnet.snowtrace.io", nativeCurrency:{name:"AVAX",symbol:"AVAX",decimals:18} },
 ];
 
 function short(a:string){ return a.slice(0,6)+"…"+a.slice(-4); }
@@ -32,7 +32,19 @@ export default function Nav() {
   const menuRef  = useRef<HTMLDivElement>(null);
   const chainRef = useRef<HTMLDivElement>(null);
 
-  useEffect(()=>{ const id=setInterval(()=>setGas(g=>Math.max(4,Math.min(25,g+(Math.random()>.5?1:-1)))),3000); return ()=>clearInterval(id); },[]);
+  useEffect(()=>{
+  async function fetchGas(){
+    const chain = CHAINS.find(c=>c.hex===currentHex) ?? CHAINS[0];
+    try{
+      const res = await fetch(chain.rpc,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id:1,method:"eth_gasPrice",params:[]})});
+      const j = await res.json();
+      if(j.result){ const gwei = Number(BigInt(j.result)) / 1e9; setGas(Math.round(gwei*10)/10); }
+    }catch{}
+  }
+  fetchGas();
+  const id = setInterval(fetchGas, 12000);
+  return ()=>clearInterval(id);
+},[currentHex]);
   useEffect(()=>{ const h=(e:MouseEvent)=>{ if(menuRef.current&&!menuRef.current.contains(e.target as Node))setMenu(false); if(chainRef.current&&!chainRef.current.contains(e.target as Node))setChainOpen(false); }; document.addEventListener("mousedown",h); return ()=>document.removeEventListener("mousedown",h); },[]);
 
   // Detect current chain from MetaMask
@@ -52,7 +64,7 @@ export default function Nav() {
       await eth.request({method:"wallet_switchEthereumChain",params:[{chainId:chain.hex}]});
     }catch(e:any){
       if(e.code===4902){
-        await eth.request({method:"wallet_addEthereumChain",params:[{chainId:chain.hex,chainName:chain.label,nativeCurrency:{name:"ETH",symbol:"ETH",decimals:18},rpcUrls:[chain.rpc],blockExplorerUrls:[chain.explorer]}]});
+        await eth.request({method:"wallet_addEthereumChain",params:[{chainId:chain.hex,chainName:chain.label,nativeCurrency:chain.nativeCurrency,rpcUrls:[chain.rpc],blockExplorerUrls:[chain.explorer]}]});
       }
     }
     setChainOpen(false);
@@ -66,9 +78,9 @@ export default function Nav() {
     <>
     <nav>
       <div className="logo-wrap">
-        <div className="logo-box">A</div>
+        <div className="logo-box" style={{background:"linear-gradient(135deg,#00e5ff,#7c3aed,#ff6b6b)",boxShadow:"0 0 14px rgba(0,229,255,0.5)",fontSize:18,fontWeight:900,letterSpacing:-1}}>M</div>
         <div>
-          <div className="logo-name">Arc Dapp</div>
+          <div className="logo-name" style={{background:"linear-gradient(90deg,#00e5ff,#7c3aed)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",fontWeight:800}}>Matrix</div>
           <a className="logo-faucet" href="https://faucet.circle.com/" target="_blank" rel="noopener noreferrer">FAUCET ↗</a>
         </div>
       </div>
