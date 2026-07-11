@@ -2,7 +2,7 @@
 
 **Matrix** is a decentralized exchange (DEX) built on **Arc Network Testnet**, featuring token swaps, cross-chain bridging, liquidity pools, and token transfers — all powered by Circle's stablecoin infrastructure.
 
-🔗 **Live demo:** https://matrix-dapp-neon.vercel.app/swap
+🔗 **Live:** https://matrix-dapp-neon.vercel.app/swap
 
 ---
 
@@ -106,7 +106,6 @@ Send any ERC-20 token to any address on Arc Network.
 
 - [ ] USDC/cirBTC and EURC/cirBTC pools (contracts deployed, UI in progress)
 - [ ] Multi-hop swap routing (e.g. EURC → USDC → cirBTC)
-- [ ] Transaction history persisted in localStorage
 - [ ] Portfolio dashboard (balances + LP positions + PnL)
 - [ ] AI Agent integration (Arc ERC-8004)
 
