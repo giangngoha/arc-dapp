@@ -78,9 +78,9 @@ export default function Nav() {
     <>
     <nav>
       <div className="logo-wrap">
-        <div className="logo-box">A</div>
+        <div className="logo-box"><span className="logo-m">M</span></div>
         <div>
-          <div className="logo-name">Arc Dapp</div>
+          <div className="logo-name">Matrix</div>
           <a className="logo-faucet" href="https://faucet.circle.com/" target="_blank" rel="noopener noreferrer">FAUCET ↗</a>
         </div>
       </div>

@@ -70,3 +70,4 @@ rebalance_pool.mjs
 add_liquidityUSDCcirBTC.mjs
 add_liquidityEURCcirBTC.mjs
 check_i.mjs
+check-pair.mjs

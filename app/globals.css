@@ -43,7 +43,10 @@ nav {
   position: sticky; top: 0; z-index: 50;
 }
 .logo-wrap { display:flex; align-items:center; gap:10px; margin-right:40px; flex-shrink:0; }
-.logo-box { width:34px; height:34px; background:linear-gradient(135deg,#00e5ff,#0066ff); border-radius:8px; display:flex; align-items:center; justify-content:center; font-weight:700; font-size:16px; color:#fff; flex-shrink:0; }
+.logo-box { width:36px; height:36px; background:#0d1117; border-radius:8px; display:flex; align-items:center; justify-content:center; flex-shrink:0; animation:neonPulse 2s ease-in-out infinite; }
+@keyframes neonPulse { 0%,100%{box-shadow:0 0 0 1.5px rgba(0,229,255,0.3)} 50%{box-shadow:0 0 0 1.5px rgba(0,229,255,0.9),0 0 14px rgba(0,229,255,0.25)} }
+.logo-m { font-weight:900; font-size:20px; color:#00e5ff; line-height:1; }
+.logo-name { font-size:16px; font-weight:800; background:linear-gradient(90deg, #00e5ff 0%, #0066ff 40%, #a855f7 80%, #e879f9 100%); -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text; letter-spacing:-0.3px; line-height:1; }
 .logo-name { font-size:16px; font-weight:700; color:var(--text0); line-height:1; }
 .logo-faucet { font-size:10px; color:var(--cyan); text-transform:uppercase; letter-spacing:1px; cursor:pointer; display:flex; align-items:center; gap:2px; text-decoration:none; }
 .logo-faucet:hover { opacity:.8; }
@@ -150,4 +153,3 @@ nav {
 input[type=number]::-webkit-outer-spin-button,
 input[type=number]::-webkit-inner-spin-button { -webkit-appearance:none; margin:0; }
 input[type=number] { -moz-appearance:textfield; }
-input[type=number] { appearance: textfield; }
