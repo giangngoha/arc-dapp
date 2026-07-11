@@ -63,7 +63,6 @@ Send any ERC-20 token to any address on Arc Network.
 | USDC | `0x3600000000000000000000000000000000000000` |
 | EURC | `0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a` |
 | cirBTC | `0xf0C4a4CE82A5746AbAAd9425360Ab04fbBA432BF` |
-| USDC/EURC Pair | `0x5eFf76b80A58ea34b23d0981bCCe2E639171c9cb` |
 
 > Factory and Router were custom-deployed on Arc Testnet using **Foundry**.
 
