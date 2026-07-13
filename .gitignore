@@ -71,3 +71,8 @@ add_liquidityUSDCcirBTC.mjs
 add_liquidityEURCcirBTC.mjs
 check_i.mjs
 check-pair.mjs
+
+#back up
+backup_pool-page.tsx
+backup_swap-page.tsx
+

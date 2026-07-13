@@ -24,14 +24,14 @@ const POOLS = [
   {
     id:    "usdc-cirbtc",
     tokenA: "USDC", tokenB: "cirBTC",
-    pair:  "0xa1d507a9662012bd43bf1ba5e03989d750a8c069", // ← paste địa chỉ pair sau khi chạy create-pool-usdc-btc.mjs
+    pair:  "0xa1d507a9662012bd43bf1ba5e03989d750a8c069",
     label: "USDC / cirBTC",
     fee:   "0.3%",
   },
   {
     id:    "eurc-cirbtc",
     tokenA: "EURC", tokenB: "cirBTC",
-    pair:  "0x4404ec28d88768e3d36c3f8b981f662aba09d1c0", // ← paste địa chỉ pair sau khi chạy create-pool-eurc-btc.mjs
+    pair:  "0x4404ec28d88768e3d36c3f8b981f662aba09d1c0",
     label: "EURC / cirBTC",
     fee:   "0.3%",
   },
@@ -55,6 +55,37 @@ const encodeTotalSupply  = () => "0x18160ddd";
 const encodeBalanceOfLP  = (a:string) => "0x70a08231"+pad32(a,true);
 
 // ─── RPC / helpers ───────────────────────────────────────────────────────────
+// Tính APR từ Swap events trong 24h
+// Swap event topic: keccak256("Swap(address,uint256,uint256,uint256,uint256,address)")
+const SWAP_TOPIC = "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822";
+
+async function getVolume24h(pairAddr: string, tokenADecimals: number): Promise<number> {
+  try {
+    // Lấy block hiện tại
+    const blockHex = await rpc("eth_blockNumber", []) as string;
+    const currentBlock = parseInt(blockHex, 16);
+    // ~24h = 7200 blocks (Arc ~12s/block)
+    const fromBlock = Math.max(0, currentBlock - 7200).toString(16);
+    const logs: any = await rpc("eth_getLogs", [{
+      address: pairAddr,
+      topics:  [SWAP_TOPIC],
+      fromBlock: "0x" + fromBlock,
+      toBlock:   "latest",
+    }]);
+    if (!logs || !Array.isArray(logs)) return 0;
+    // Mỗi Swap log: amount0In(32) amount1In(32) amount0Out(32) amount1Out(32)
+    let totalVol = 0;
+    for (const log of logs) {
+      const d = log.data.replace("0x","");
+      if (d.length < 256) continue;
+      const a0in  = Number(BigInt("0x"+d.slice(0,64)))   / 10**tokenADecimals;
+      const a0out = Number(BigInt("0x"+d.slice(128,192))) / 10**tokenADecimals;
+      totalVol += a0in + a0out; // volume tính theo tokenA (USDC hoặc EURC ≈ 1 USD)
+    }
+    return totalVol;
+  } catch { return 0; }
+}
+
 async function rpc(method:string,params:unknown[]):Promise<unknown> {
   const r = await fetch("https://rpc.testnet.arc.network",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id:1,method,params})});
   const j = await r.json();
@@ -113,7 +144,7 @@ function PoolCard({pool,onClick}:{pool:typeof POOLS[0];onClick:()=>void}) {
 }
 
 // ─── Pool detail ──────────────────────────────────────────────────────────────
-interface PoolInfo { resA:number; resB:number; totalSupply:number; userLp:number; sharePct:number; userA:number; userB:number; }
+interface PoolInfo { resA:number; resB:number; totalSupply:number; userLp:number; sharePct:number; userA:number; userB:number; tvlUSD:number; apr:number|null; }
 
 function PoolDetail({pool,wallet,openModal,refreshBalances,onBack}:{pool:typeof POOLS[0];wallet:any;openModal:()=>void;refreshBalances:()=>Promise<void>;onBack:()=>void}) {
   const tA = TOKENS[pool.tokenA as keyof typeof TOKENS];
@@ -151,7 +182,13 @@ function PoolDetail({pool,wallet,openModal,refreshBalances,onBack}:{pool:typeof 
       const totalSupply = supRaw&&supRaw!=="0x" ? Number(BigInt(supRaw as string))/1e18 : 0;
       const userLp = lpRaw&&lpRaw!=="0x"&&lpRaw!=="0x0" ? Number(BigInt(lpRaw as string))/1e18 : 0;
       const sharePct = totalSupply>0 ? userLp/totalSupply*100 : 0;
-      setInfo({resA,resB,totalSupply,userLp,sharePct,userA:resA*(sharePct/100),userB:resB*(sharePct/100)});
+      // TVL = resA * 2 (assume tokenA ≈ USD, e.g. USDC/EURC both ~$1, cirBTC excluded)
+      const tvlUSD = resA * 2;
+      // Volume 24h từ Swap events
+      const vol24h = await getVolume24h(pool.pair, tA.decimals);
+      // APR = fee 0.3% × volume24h × 365 / TVL
+      const apr = tvlUSD > 0 && vol24h > 0 ? (0.003 * vol24h * 365 / tvlUSD * 100) : null;
+      setInfo({resA,resB,totalSupply,userLp,sharePct,userA:resA*(sharePct/100),userB:resB*(sharePct/100),tvlUSD,apr});
     } catch(e){console.error(e);}
     finally{setFetch(false);}
   },[pool.pair,wallet.connected,wallet.address]);
@@ -285,7 +322,16 @@ function PoolDetail({pool,wallet,openModal,refreshBalances,onBack}:{pool:typeof 
                 <div style={{fontSize:18,fontWeight:800,fontFamily:"var(--mono)"}}>{info.resB.toLocaleString(undefined,{maximumFractionDigits:tB.decimals})}</div>
               </div>
             </div>
-            {rate && <div style={{fontSize:12,color:"var(--text2)",fontFamily:"var(--mono)"}}>1 {pool.tokenA} ≈ <strong style={{color:"var(--text1)"}}>{rate.toFixed(6)}</strong> {pool.tokenB}</div>}
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8,marginTop:2}}>
+              {rate && <div style={{fontSize:12,color:"var(--text2)",fontFamily:"var(--mono)"}}>1 {pool.tokenA} ≈ <strong style={{color:"var(--text1)"}}>{rate.toFixed(6)}</strong> {pool.tokenB}</div>}
+              <div style={{display:"flex",gap:12}}>
+                {info.tvlUSD > 0 && <div style={{fontSize:12,fontFamily:"var(--mono)",color:"var(--text2)"}}>TVL: <strong style={{color:"var(--text1)"}}>${info.tvlUSD.toLocaleString(undefined,{maximumFractionDigits:2})}</strong></div>}
+                {info.apr !== null
+                  ? <div style={{fontSize:12,fontFamily:"var(--mono)",color:"var(--text2)"}}>APR: <strong style={{color:"var(--green)"}}>{info.apr.toFixed(2)}%</strong></div>
+                  : <div style={{fontSize:12,fontFamily:"var(--mono)",color:"var(--text2)"}}>APR: <strong style={{color:"var(--text2)"}}>—</strong> <span style={{fontSize:10,color:"var(--text2)"}}>no volume yet</span></div>
+                }
+              </div>
+            </div>
           </>
         ) : <div style={{fontSize:13,color:"var(--text2)"}}>Could not load pool data.</div>}
       </div>
