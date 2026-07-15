@@ -4,6 +4,7 @@ import { usePathname } from "next/navigation";
 import { useState, useEffect, useRef } from "react";
 import { useWallet, getBal } from "./WalletProvider";
 import WalletModal from "./WalletModal";
+import { ARC_RPC, ARC_EXPLORER } from "@/lib/contracts";
 
 const LINKS = [
   { href:"/swap",      label:"Exchange"   },
@@ -14,7 +15,7 @@ const LINKS = [
 ];
 
 const CHAINS = [
-  { id:"arc",     label:"Arc Testnet", hex:"0x4cef52", dot:"#00b4d8", rpc:"https://rpc.testnet.arc.network",              explorer:"https://testnet.arcscan.app",        nativeCurrency:{name:"USDC",symbol:"USDC",decimals:18} },
+  { id:"arc",     label:"Arc Testnet", hex:"0x4cef52", dot:"#00b4d8", rpc:ARC_RPC,              explorer:ARC_EXPLORER,        nativeCurrency:{name:"USDC",symbol:"USDC",decimals:18} },
   { id:"sepolia", label:"Eth Sepolia", hex:"0xaa36a7", dot:"#627EEA", rpc:"https://ethereum-sepolia-rpc.publicnode.com", explorer:"https://sepolia.etherscan.io",       nativeCurrency:{name:"ETH",symbol:"ETH",decimals:18}  },
   { id:"fuji",    label:"Avax Fuji",   hex:"0xa869",   dot:"#E84142", rpc:"https://api.avax-test.network/ext/bc/C/rpc",   explorer:"https://testnet.snowtrace.io",       nativeCurrency:{name:"AVAX",symbol:"AVAX",decimals:18} },
 ];
