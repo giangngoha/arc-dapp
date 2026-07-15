@@ -10,7 +10,7 @@ export interface WalletState {
 }
 interface WalletCtx {
   wallet: WalletState;
-  connect: (type: "MetaMask" | "Rabby" | "Demo") => Promise<void>;
+  connect: (type: "MetaMask" | "Rabby") => Promise<void>;
   disconnect: () => void;
   refreshBalances: () => Promise<void>;
   updateBalance: (sym: string, delta: number) => void;
@@ -68,11 +68,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     loadBal(address);
   }
 
-  const connect = useCallback(async (type:"MetaMask"|"Rabby"|"Demo") => {
-    if (type==="Demo") {
-      setWallet({ connected:true, walletType:"Demo", address:"0x4e31a16c8d2b2bd6d5a0a8f8c0da3e7c6f9b1234", chainId:5042002, balancesLoading:false, balances:{ ARC:0, USDC:75, EURC:40, cirBTC:0.00125, ETH:0 } });
-      setModal(false); return;
-    }
+  const connect = useCallback(async (type:"MetaMask"|"Rabby") => {
     const eth = (window as any).ethereum;
     if (!eth) throw new Error(`${type} not detected.`);
     let provider = eth;

@@ -1,5 +1,6 @@
 "use client";
 import { useState, useRef, useEffect } from "react";
+import { ARC_RPC } from "@/lib/contracts";
 
 export interface TokenInfo {
   symbol: string;
@@ -64,7 +65,7 @@ export default function TokenSelector({ label, value, onChange, name }: Props) {
     } catch (err) {
       // Fallback: RPC call cho symbol()
       try {
-        const rpcRes  = await fetch("https://rpc.testnet.arc.network", {
+        const rpcRes  = await fetch(ARC_RPC, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ jsonrpc:"2.0", id:1, method:"eth_call",

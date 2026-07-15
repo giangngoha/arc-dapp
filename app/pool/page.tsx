@@ -2,7 +2,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { useWallet, getBal } from "@/components/WalletProvider";
 import { showToast } from "@/components/Toast";
-import { ARC_EXPLORER, CONTRACTS, toUnits, encodeApprove, encodeAllowance } from "@/lib/contracts";
+import { ARC_RPC, ARC_EXPLORER, CONTRACTS, toUnits, encodeApprove, encodeAllowance } from "@/lib/contracts";
 
 // ─── Pool definitions ─────────────────────────────────────────────────────────
 const ROUTER  = "0x29E0C2A0780196792dECc9183Dd5aA540c955BDf";
@@ -13,30 +13,6 @@ const TOKENS = {
   EURC:   { addr: CONTRACTS.EURC,   decimals: 6,  color: "#2B5EDD", label: "EURC" },
   cirBTC: { addr: CONTRACTS.cirBTC, decimals: 8,  color: "#F7931A", label: "cirBTC" },
 };
-
-const POOLS = [
-  {
-    id:    "usdc-eurc",
-    tokenA: "USDC", tokenB: "EURC",
-    pair:  "0x5eFf76b80A58ea34b23d0981bCCe2E639171c9cb",
-    label: "USDC / EURC",
-    fee:   "0.3%",
-  },
-  {
-    id:    "usdc-cirbtc",
-    tokenA: "USDC", tokenB: "cirBTC",
-    pair:  "0xa1d507a9662012bd43bf1ba5e03989d750a8c069",
-    label: "USDC / cirBTC",
-    fee:   "0.3%",
-  },
-  {
-    id:    "eurc-cirbtc",
-    tokenA: "EURC", tokenB: "cirBTC",
-    pair:  "0x4404ec28d88768e3d36c3f8b981f662aba09d1c0",
-    label: "EURC / cirBTC",
-    fee:   "0.3%",
-  },
-];
 
 // Known pool combinations — UI discovers pair address dynamically from Factory
 const POOL_PAIRS = [
@@ -101,7 +77,7 @@ async function getVolume24h(pairAddr: string, tokenADecimals: number): Promise<n
 }
 
 async function rpc(method:string,params:unknown[]):Promise<unknown> {
-  const r = await fetch("https://rpc.testnet.arc.network",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id:1,method,params})});
+  const r = await fetch(ARC_RPC,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id:1,method,params})});
   const j = await r.json();
   if(j.error) throw new Error(j.error.message??JSON.stringify(j.error));
   return j.result;
@@ -112,7 +88,7 @@ async function switchToArc() {
   try{cur=await eth.request({method:"eth_chainId"});}catch{}
   if(cur?.toLowerCase()===hex) return;
   try{await eth.request({method:"wallet_switchEthereumChain",params:[{chainId:hex}]});}
-  catch(e:any){if(e.code===4902)await eth.request({method:"wallet_addEthereumChain",params:[{chainId:hex,chainName:"Arc Network Testnet",nativeCurrency:{name:"USDC",symbol:"USDC",decimals:18},rpcUrls:["https://rpc.testnet.arc.network"],blockExplorerUrls:[ARC_EXPLORER]}]});else throw e;}
+  catch(e:any){if(e.code===4902)await eth.request({method:"wallet_addEthereumChain",params:[{chainId:hex,chainName:"Arc Network Testnet",nativeCurrency:{name:"USDC",symbol:"USDC",decimals:18},rpcUrls:[ARC_RPC],blockExplorerUrls:[ARC_EXPLORER]}]});else throw e;}
   for(let i=0;i<20;i++){await new Promise(r=>setTimeout(r,400));try{const c=await eth.request({method:"eth_chainId"});if(c?.toLowerCase()===hex)return;}catch{}}
 }
 async function waitTx(hash:string,maxMs=90000):Promise<boolean> {
@@ -188,9 +164,12 @@ function PoolDetail({pool,wallet,openModal,refreshBalances,onBack}:{pool:PoolDef
       ]);
       const hex = (resRaw as string).replace("0x","");
       // sort: token with lower address = token0
+      // Uniswap V2 sorts tokens by address: lower address = token0
       const aIsToken0 = tA.addr.toLowerCase() < tB.addr.toLowerCase();
-      const raw0 = hex.length>=64 ? Number(BigInt("0x"+hex.slice(0,64)))/10**tA.decimals : 0;
-      const raw1 = hex.length>=128 ? Number(BigInt("0x"+hex.slice(64,128)))/10**tB.decimals : 0;
+      const dec0 = aIsToken0 ? tA.decimals : tB.decimals;
+      const dec1 = aIsToken0 ? tB.decimals : tA.decimals;
+      const raw0 = hex.length>=64  ? Number(BigInt("0x"+hex.slice(0,64)))   / 10**dec0 : 0;
+      const raw1 = hex.length>=128 ? Number(BigInt("0x"+hex.slice(64,128))) / 10**dec1 : 0;
       const resA = aIsToken0 ? raw0 : raw1;
       const resB = aIsToken0 ? raw1 : raw0;
       const totalSupply = supRaw&&supRaw!=="0x" ? Number(BigInt(supRaw as string))/1e18 : 0;

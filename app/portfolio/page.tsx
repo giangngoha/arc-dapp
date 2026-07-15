@@ -1,17 +1,17 @@
 "use client";
 import { useState, useEffect, useCallback } from "react";
 import { useWallet } from "@/components/WalletProvider";
-import { ARC_EXPLORER, CONTRACTS, TOKEN_META } from "@/lib/contracts";
+import { ARC_RPC, ARC_EXPLORER, CONTRACTS, TOKEN_META } from "@/lib/contracts";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-const RPC     = "https://rpc.testnet.arc.network";
 const FACTORY = "0x8994A0b7E383bd62341319b22A198dEF7154ff9F";
 const ROUTER  = "0x29E0C2A0780196792dECc9183Dd5aA540c955BDf";
 
 const TOKENS = [
-  { sym:"USDC",   addr:CONTRACTS.USDC,   decimals:6, color:"#2775CA", price:1      },
-  { sym:"EURC",   addr:CONTRACTS.EURC,   decimals:6, color:"#2B5EDD", price:1.082  },
-  { sym:"cirBTC", addr:CONTRACTS.cirBTC, decimals:8, color:"#F7931A", price:63367  },
+  { sym:"USDC",   addr:CONTRACTS.USDC,   decimals:6, color:"#2775CA", price:1     },
+  { sym:"EURC",   addr:CONTRACTS.EURC,   decimals:6, color:"#2B5EDD", price:1.082 },
+  // cirBTC price set to 0 — not included in USD total (no live price feed)
+  { sym:"cirBTC", addr:CONTRACTS.cirBTC, decimals:8, color:"#F7931A", price:0     },
 ];
 
 const POOLS = [
@@ -22,7 +22,7 @@ const POOLS = [
 
 // ─── RPC helpers ─────────────────────────────────────────────────────────────
 async function rpc(method: string, params: unknown[]) {
-  const r = await fetch(RPC, {
+  const r = await fetch(ARC_RPC, {
     method:"POST", headers:{"Content-Type":"application/json"},
     body: JSON.stringify({ jsonrpc:"2.0", id:1, method, params }),
   });
@@ -193,7 +193,7 @@ export default function PortfolioPage() {
                       {t.balance.toLocaleString(undefined, { maximumFractionDigits:t.decimals===8?8:4 })}
                     </div>
                     <div style={{ fontSize:12, color:"var(--text2)", fontFamily:"var(--mono)" }}>
-                      ${t.valueUSD.toLocaleString(undefined,{maximumFractionDigits:2})}
+                      {t.price > 0 ? `$${t.valueUSD.toLocaleString(undefined,{maximumFractionDigits:2})}` : "no price feed"}
                     </div>
                   </div>
                 </div>
@@ -269,7 +269,7 @@ export default function PortfolioPage() {
             <div style={{ display:"flex", gap:20, flexWrap:"wrap" }}>
               {TOKENS.map(t=>(
                 <span key={t.sym} style={{ fontSize:12, fontFamily:"var(--mono)", color:"var(--text2)" }}>
-                  {t.sym}: <strong style={{ color:"var(--text1)" }}>${t.price.toLocaleString()}</strong>
+                  {t.sym}: <strong style={{ color:"var(--text1)" }}>{t.price > 0 ? `$${t.price.toLocaleString()}` : "N/A"}</strong>
                 </span>
               ))}
             </div>

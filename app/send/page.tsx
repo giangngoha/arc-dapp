@@ -65,14 +65,18 @@ export default function SendPage(){
 
   useEffect(()=>{
     if(!custAddr||!isAddr(custAddr)){setCustInfo(null);return;}
-    const eth=(window as any).ethereum; if(!eth)return;
     setFetching(true);
     const pad=custAddr.toLowerCase().replace("0x","").padStart(64,"0");
+    // Use RPC directly so lookup always targets Arc Testnet regardless of MetaMask's current chain
+    async function rpcCall(data:string):Promise<string> {
+      const r=await fetch(ARC_RPC,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id:1,method:"eth_call",params:[{to:custAddr,data},"latest"]})});
+      return (await r.json()).result??"0x";
+    }
     Promise.all([
-      eth.request({method:"eth_call",params:[{to:custAddr,data:"0x95d89b41"},"latest"]}),
-      eth.request({method:"eth_call",params:[{to:custAddr,data:"0x313ce567"},"latest"]}),
-      wallet.connected?eth.request({method:"eth_call",params:[{to:custAddr,data:"0x70a08231"+pad},"latest"]}):Promise.resolve("0x"),
-    ]).then(([symHex,decHex,balHex]:[string,string,string])=>{
+      rpcCall("0x95d89b41"),                          // symbol()
+      rpcCall("0x313ce567"),                          // decimals()
+      wallet.connected ? rpcCall("0x70a08231"+pad) : Promise.resolve("0x"), // balanceOf()
+    ]).then(([symHex,decHex,balHex])=>{
       const sym=parseAbiStr(symHex)||custAddr.slice(0,6)+"…";
       const dec=decHex&&decHex!=="0x"?parseInt(decHex,16):18;
       const b=balHex&&balHex!=="0x"?Number(BigInt(balHex))/10**dec:0;
