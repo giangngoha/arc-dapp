@@ -25,14 +25,14 @@ const POOLS = [
   {
     id:    "usdc-cirbtc",
     tokenA: "USDC", tokenB: "cirBTC",
-    pair:  "", // ← paste địa chỉ pair sau khi chạy create-pool-usdc-btc.mjs
+    pair:  "0xa1d507a9662012bd43bf1ba5e03989d750a8c069",
     label: "USDC / cirBTC",
     fee:   "0.3%",
   },
   {
     id:    "eurc-cirbtc",
     tokenA: "EURC", tokenB: "cirBTC",
-    pair:  "", // ← paste địa chỉ pair sau khi chạy create-pool-eurc-btc.mjs
+    pair:  "0x4404ec28d88768e3d36c3f8b981f662aba09d1c0",
     label: "EURC / cirBTC",
     fee:   "0.3%",
   },

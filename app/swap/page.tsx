@@ -2,7 +2,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useWallet, getBal } from "@/components/WalletProvider";
 import { showToast } from "@/components/Toast";
-import { ARC_EXPLORER, CONTRACTS, toUnits, encodeApprove, encodeAllowance } from "@/lib/contracts";
+import { ARC_RPC, ARC_EXPLORER, CONTRACTS, toUnits, encodeApprove, encodeAllowance } from "@/lib/contracts";
 
 const ROUTER   = "0x29E0C2A0780196792dECc9183Dd5aA540c955BDf";
 const PAIR     = "0x5eFf76b80A58ea34b23d0981bCCe2E639171c9cb";
@@ -59,7 +59,7 @@ function encodeSwap(amtIn: bigint, amtOutMin: bigint, path: string[], to: string
 }
 
 async function rpcCall(method: string, params: unknown[]): Promise<unknown> {
-  const res = await fetch("https://rpc.testnet.arc.network", {
+  const res = await fetch(ARC_RPC, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ jsonrpc:"2.0", id:1, method, params }),
   });
@@ -76,7 +76,7 @@ async function switchToArc() {
   if (cur?.toLowerCase() === hex) return;
   try { await eth.request({ method:"wallet_switchEthereumChain", params:[{ chainId:hex }] }); }
   catch (e: any) {
-    if (e.code===4902) await eth.request({ method:"wallet_addEthereumChain", params:[{ chainId:hex, chainName:"Arc Network Testnet", nativeCurrency:{ name:"USDC", symbol:"USDC", decimals:18 }, rpcUrls:["https://rpc.testnet.arc.network"], blockExplorerUrls:["https://testnet.arcscan.app"] }] });
+    if (e.code===4902) await eth.request({ method:"wallet_addEthereumChain", params:[{ chainId:hex, chainName:"Arc Network Testnet", nativeCurrency:{ name:"USDC", symbol:"USDC", decimals:18 }, rpcUrls:[ARC_RPC], blockExplorerUrls:["https://testnet.arcscan.app"] }] });
     else throw e;
   }
   for (let i=0; i<20; i++) {
@@ -186,7 +186,7 @@ function AddTokenModal({ onClose, onAdd, tokenMeta }: {
     try {
       function pad(v: string) { return v.toLowerCase().replace("0x","").padStart(64,"0"); }
       async function call(data: string) {
-        const r = await fetch("https://rpc.testnet.arc.network", {
+        const r = await fetch(ARC_RPC, {
           method:"POST", headers:{"Content-Type":"application/json"},
           body: JSON.stringify({jsonrpc:"2.0",id:1,method:"eth_call",params:[{to:addr,data},"latest"]}),
         });
@@ -401,7 +401,10 @@ export default function SwapPage() {
         const amtOutRaw = BigInt("0x"+hex.slice(lastIdx, lastIdx+64));
         const amtOut = Number(amtOutRaw)/10**tokenOutDec;
         const rate   = (amtOut/amtNum).toFixed(tokenOutDec===8?8:6);
-        const impact = (Math.abs(1-amtOut/amtNum)*100).toFixed(2);
+        // Impact chỉ có ý nghĩa khi cùng đơn vị (USDC↔EURC, single-hop)
+        const impact = (!isMultiHop && tokenInDec===tokenOutDec)
+          ? (Math.abs(1-amtOut/amtNum)*100).toFixed(2)
+          : "N/A";
         setEstimate({ amtOut:amtOut.toFixed(tokenOutDec===8?8:6), rate, impact });
       } catch { setEstimate(null); }
       finally { setEstimating(false); }
@@ -425,7 +428,9 @@ export default function SwapPage() {
         const amtOutRaw = BigInt("0x"+hex.slice(lastIdx, lastIdx+64));
         const amtOut = Number(amtOutRaw)/10**tokenOutDec;
         const rate   = (amtOut/amtNum).toFixed(tokenOutDec===8?8:6);
-        const impact = (Math.abs(1-amtOut/amtNum)*100).toFixed(2);
+        const impact = (!isMultiHop && tokenInDec===tokenOutDec)
+          ? (Math.abs(1-amtOut/amtNum)*100).toFixed(2)
+          : "N/A";
         setEstimate({ amtOut:amtOut.toFixed(tokenOutDec===8?8:6), rate, impact });
       } catch {}
     }, 15000);
@@ -483,7 +488,7 @@ export default function SwapPage() {
   const closeInRef  = useRef<()=>void>(()=>{});
   const closeOutRef = useRef<()=>void>(()=>{});
 
-  const impactColor = (v:string) => parseFloat(v)<1?"var(--green)":parseFloat(v)<3?"#f59e0b":"var(--red)";
+  const impactColor = (v:string) => v==="N/A"?"var(--text2)":parseFloat(v)<1?"var(--green)":parseFloat(v)<3?"#f59e0b":"var(--red)";
   const rate = reserves && !isMultiHop
     ? (tokenIn==="USDC" ? reserves.eurc/reserves.usdc : reserves.usdc/reserves.eurc)
     : null;

@@ -2,7 +2,7 @@
 import { useState, useEffect } from "react";
 import { useWallet, getBal } from "@/components/WalletProvider";
 import { showToast } from "@/components/Toast";
-import { ARC_EXPLORER } from "@/lib/contracts";
+import { ARC_RPC, ARC_EXPLORER } from "@/lib/contracts";
 
 const BUILTIN = [
   { sym:"USDC",   name:"USD Coin",       bg:"#2775CA", addr:"0x3600000000000000000000000000000000000000", dec:6 },
@@ -19,13 +19,19 @@ async function switchToArc(){
   try{cur=await eth.request({method:"eth_chainId"});}catch{}
   if(cur?.toLowerCase()===hex)return;
   try{await eth.request({method:"wallet_switchEthereumChain",params:[{chainId:hex}]});}
-  catch(e:any){ if(e.code===4902) await eth.request({method:"wallet_addEthereumChain",params:[{chainId:hex,chainName:"Arc Network Testnet",nativeCurrency:{name:"USDC",symbol:"USDC",decimals:18},rpcUrls:["https://rpc.testnet.arc.network"],blockExplorerUrls:[ARC_EXPLORER]}]}); else throw e; }
+  catch(e:any){ if(e.code===4902) await eth.request({method:"wallet_addEthereumChain",params:[{chainId:hex,chainName:"Arc Network Testnet",nativeCurrency:{name:"USDC",symbol:"USDC",decimals:18},rpcUrls:[ARC_RPC],blockExplorerUrls:[ARC_EXPLORER]}]}); else throw e; }
 }
 
-async function waitTx(hash:string,maxWait=60000):Promise<boolean>{
-  const eth=(window as any).ethereum; const start=Date.now();
-  while(Date.now()-start<maxWait){ await new Promise(r=>setTimeout(r,2500));
-    try{ const r=await eth.request({method:"eth_getTransactionReceipt",params:[hash]}); if(r?.status)return r.status==="0x1"; }catch{} }
+async function waitTx(hash:string,maxWait=90000):Promise<boolean>{
+  const start=Date.now();
+  while(Date.now()-start<maxWait){ await new Promise(r=>setTimeout(r,3000));
+    try{
+      const res=await fetch(ARC_RPC,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id:1,method:"eth_getTransactionReceipt",params:[hash]})});
+      const j=await res.json();
+      const r=j.result;
+      if(r?.blockNumber) return r.status==="0x1"||r.status===1;
+    }catch{}
+  }
   return false;
 }
 
@@ -144,7 +150,7 @@ export default function SendPage(){
                 {showDrop&&<div style={{position:"fixed",inset:0,zIndex:100}} onClick={()=>setShowDrop(false)}/>}
               </div>
             </div>
-            <div style={{fontSize:12,color:"var(--text2)",marginTop:8,fontFamily:"var(--mono)"}}>{amtN>0?`≈ ${activeSym==="cirBTC"?`$${(amtN*67450).toFixed(2)}`:activeSym==="USDC"||activeSym==="EURC"?`$${amtN.toFixed(2)}`:`${amtN} tokens`}`:"$0.00"}</div>
+            <div style={{fontSize:12,color:"var(--text2)",marginTop:8,fontFamily:"var(--mono)"}}>{amtN>0?`≈ ${activeSym==="USDC"||activeSym==="EURC"?`$${amtN.toFixed(2)}`:activeSym==="cirBTC"?`${amtN} cirBTC`:`${amtN} tokens`}`:"$0.00"}</div>
           </div>
         </div>
 

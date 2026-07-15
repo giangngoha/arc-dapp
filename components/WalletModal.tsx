@@ -4,14 +4,13 @@ import { useWallet } from "./WalletProvider";
 const WALLETS = [
   { id:"MetaMask" as const, name:"MetaMask",     desc:"Browser extension wallet",        color:"#F6851B", icon:"🦊" },
   { id:"Rabby"    as const, name:"Rabby Wallet", desc:"Security-focused browser wallet", color:"#7148e8", icon:"🐰" },
-  { id:"Demo"     as const, name:"Demo Mode",    desc:"Explore without a real wallet",   color:"#3B99FC", icon:"👁" },
 ];
 export default function WalletModal() {
   const { modalOpen, closeModal, connect } = useWallet();
   const [loading, setLoading] = useState<string|null>(null);
   const [err, setErr]         = useState("");
   if (!modalOpen) return null;
-  async function handle(id:"MetaMask"|"Rabby"|"Demo") {
+  async function handle(id:"MetaMask"|"Rabby") {
     setErr(""); setLoading(id);
     try { await connect(id); } catch(e:unknown) { setErr(e instanceof Error ? e.message : String(e)); }
     setLoading(null);
