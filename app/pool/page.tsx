@@ -5,7 +5,8 @@ import { showToast } from "@/components/Toast";
 import { ARC_EXPLORER, CONTRACTS, toUnits, encodeApprove, encodeAllowance } from "@/lib/contracts";
 
 // ─── Pool definitions ─────────────────────────────────────────────────────────
-const ROUTER = "0x29E0C2A0780196792dECc9183Dd5aA540c955BDf";
+const ROUTER  = "0x29E0C2A0780196792dECc9183Dd5aA540c955BDf";
+const FACTORY = "0x8994A0b7E383bd62341319b22A198dEF7154ff9F";
 
 const TOKENS = {
   USDC:   { addr: CONTRACTS.USDC,   decimals: 6,  color: "#2775CA", label: "USDC" },
@@ -24,18 +25,31 @@ const POOLS = [
   {
     id:    "usdc-cirbtc",
     tokenA: "USDC", tokenB: "cirBTC",
-    pair:  "0xa1d507a9662012bd43bf1ba5e03989d750a8c069",
+    pair:  "", // ← paste địa chỉ pair sau khi chạy create-pool-usdc-btc.mjs
     label: "USDC / cirBTC",
     fee:   "0.3%",
   },
   {
     id:    "eurc-cirbtc",
     tokenA: "EURC", tokenB: "cirBTC",
-    pair:  "0x4404ec28d88768e3d36c3f8b981f662aba09d1c0",
+    pair:  "", // ← paste địa chỉ pair sau khi chạy create-pool-eurc-btc.mjs
     label: "EURC / cirBTC",
     fee:   "0.3%",
   },
 ];
+
+// Known pool combinations — UI discovers pair address dynamically from Factory
+const POOL_PAIRS = [
+  { id:"usdc-eurc",   tokenA:"USDC", tokenB:"EURC",   label:"USDC / EURC",   fee:"0.3%" },
+  { id:"usdc-cirbtc", tokenA:"USDC", tokenB:"cirBTC", label:"USDC / cirBTC", fee:"0.3%" },
+  { id:"eurc-cirbtc", tokenA:"EURC", tokenB:"cirBTC", label:"EURC / cirBTC", fee:"0.3%" },
+];
+
+type PoolDef = typeof POOL_PAIRS[0] & { pair: string; exists: boolean; fee: string };
+
+function encodeGetPair(tA: string, tB: string): string {
+  return "0xe6a43905" + tA.toLowerCase().replace("0x","").padStart(64,"0") + tB.toLowerCase().replace("0x","").padStart(64,"0");
+}
 
 const MAX_U256 = BigInt("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
 
@@ -122,7 +136,7 @@ function IR({k,v,green,mono}:{k:string;v:string;green?:boolean;mono?:boolean}) {
 }
 
 // ─── Pool card (list view) ────────────────────────────────────────────────────
-function PoolCard({pool,onClick}:{pool:typeof POOLS[0];onClick:()=>void}) {
+function PoolCard({pool,onClick}:{pool:PoolDef;onClick:()=>void}) {
   const tA = TOKENS[pool.tokenA as keyof typeof TOKENS];
   const tB = TOKENS[pool.tokenB as keyof typeof TOKENS];
   const noPair = !pool.pair;
@@ -146,7 +160,7 @@ function PoolCard({pool,onClick}:{pool:typeof POOLS[0];onClick:()=>void}) {
 // ─── Pool detail ──────────────────────────────────────────────────────────────
 interface PoolInfo { resA:number; resB:number; totalSupply:number; userLp:number; sharePct:number; userA:number; userB:number; tvlUSD:number; apr:number|null; }
 
-function PoolDetail({pool,wallet,openModal,refreshBalances,onBack}:{pool:typeof POOLS[0];wallet:any;openModal:()=>void;refreshBalances:()=>Promise<void>;onBack:()=>void}) {
+function PoolDetail({pool,wallet,openModal,refreshBalances,onBack}:{pool:PoolDef;wallet:any;openModal:()=>void;refreshBalances:()=>Promise<void>;onBack:()=>void}) {
   const tA = TOKENS[pool.tokenA as keyof typeof TOKENS];
   const tB = TOKENS[pool.tokenB as keyof typeof TOKENS];
   const [tab,setTab]       = useState<"add"|"remove">("add");
@@ -468,7 +482,33 @@ function PoolDetail({pool,wallet,openModal,refreshBalances,onBack}:{pool:typeof 
 // ─── Main page ────────────────────────────────────────────────────────────────
 export default function PoolPage() {
   const { wallet, openModal, refreshBalances } = useWallet();
-  const [selected, setSelected] = useState<typeof POOLS[0]|null>(null);
+  const [selected,  setSelected]  = useState<PoolDef|null>(null);
+  const [pools,     setPools]     = useState<PoolDef[]>([]);
+  const [discovering, setDiscovering] = useState(true);
+
+  // Dynamically discover pair addresses from Factory
+  useEffect(()=>{
+    async function discover() {
+      setDiscovering(true);
+      const results = await Promise.all(
+        POOL_PAIRS.map(async p => {
+          const tA = TOKENS[p.tokenA as keyof typeof TOKENS].addr;
+          const tB = TOKENS[p.tokenB as keyof typeof TOKENS].addr;
+          try {
+            const raw = await rpc("eth_call", [{ to:FACTORY, data:encodeGetPair(tA, tB) }, "latest"]) as string;
+            const addr = "0x" + raw.slice(-40);
+            const exists = addr !== "0x0000000000000000000000000000000000000000";
+            return { ...p, pair: exists ? addr : "", exists };
+          } catch {
+            return { ...p, pair: "", exists: false };
+          }
+        })
+      );
+      setPools(results);
+      setDiscovering(false);
+    }
+    discover();
+  }, []);
 
   if (selected) {
     return (
@@ -484,11 +524,17 @@ export default function PoolPage() {
         <h1 style={{fontSize:26,fontWeight:800,letterSpacing:-0.5,marginBottom:3}}>Liquidity Pools</h1>
         <p style={{fontSize:13,color:"var(--text2)"}}>Uniswap V2 · Arc Testnet · 0.3% fee</p>
       </div>
-      <div style={{display:"flex",flexDirection:"column",gap:10}}>
-        {POOLS.map(p=>(
-          <PoolCard key={p.id} pool={p} onClick={()=>setSelected(p)}/>
-        ))}
-      </div>
+      {discovering ? (
+        <div style={{display:"flex",gap:10,alignItems:"center",fontSize:13,color:"var(--text2)",fontFamily:"var(--mono)",padding:"20px 0"}}>
+          <span className="spinner" style={{borderTopColor:"var(--cyan)"}}/>Discovering pools from Factory…
+        </div>
+      ) : (
+        <div style={{display:"flex",flexDirection:"column",gap:10}}>
+          {pools.map(p=>(
+            <PoolCard key={p.id} pool={p} onClick={()=>setSelected(p)}/>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

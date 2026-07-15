@@ -1,45 +1,57 @@
 "use client";
 import { useState } from "react";
-import { useWallet } from "@/components/WalletProvider";
+import { useWallet} from "@/components/WalletProvider";
 import { showToast } from "@/components/Toast";
 import { toUnits, encodeApprove, encodeAllowance } from "@/lib/contracts";
 
 // ─── Contract addresses from Circle official docs ────────────────────────────
-// Source: https://developers.circle.com/cctp/quickstarts/transfer-usdc-ethereum-to-arc
-// Arc domain = 26, Sepolia domain = 0, Fuji domain = 1
+// Sources:
+//   Sepolia→Arc:  https://developers.circle.com/cctp/quickstarts/transfer-usdc-ethereum-to-arc
+//   Sepolia→Fuji: https://developers.circle.com/cctp/transfer-usdc-on-testnet-from-ethereum-to-avalanche
+//
+// CCTP V2 uses CREATE2 so TokenMessengerV2 = 0x8fe6b999... on ALL testnet EVM chains.
+// MessageTransmitterV2 = 0xe737e5ce... on ALL testnet EVM chains (confirmed by Circle docs).
+//
+// Domain IDs: Sepolia=0, Fuji=1, Arc=26
 const CHAINS = [
   {
     id: "Arc_Testnet", label: "Arc Testnet", sub: "Arc (0x4cef52)", color: "#00b4d8", icon: "A",
     chainIdHex: "0x4cef52",
     usdc:        "0x3600000000000000000000000000000000000000",
+    // Arc TokenMessengerV2 — burn USDC when Arc is SOURCE chain
     messenger:   "0x8fe6b999dc680ccfdd5bf7eb0974218be2542daa",
+    // Arc MessageTransmitterV2 — mint USDC when Arc is DESTINATION chain
     transmitter: "0xe737e5cebeeba77efe34d4aa090756590b1ce275",
     rpc:         "https://rpc.testnet.arc.network",
     explorer:    "https://testnet.arcscan.app",
     domain:      26,
-    nativeCurrency: { name: "USDC", symbol: "USDC", decimals: 18 },  // thêm dòng này
+    nativeCurrency: { name: "USDC", symbol: "USDC", decimals: 18 },
   },
   {
     id: "Ethereum_Sepolia", label: "Ethereum", sub: "Sepolia Testnet", color: "#627EEA", icon: "Ξ",
     chainIdHex: "0xaa36a7",
     usdc:        "0x1c7d4b196cb0c7b01d743fbc6116a902379c7238",
+    // Sepolia TokenMessengerV2 — confirmed by Circle docs
     messenger:   "0x8fe6b999dc680ccfdd5bf7eb0974218be2542daa",
+    // Sepolia MessageTransmitterV2 — confirmed by Circle docs
     transmitter: "0xe737e5cebeeba77efe34d4aa090756590b1ce275",
     rpc:         "https://ethereum-sepolia-rpc.publicnode.com",
     explorer:    "https://sepolia.etherscan.io",
     domain:      0,
-    nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 },    // thêm dòng này
+    nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 },
   },
   {
     id: "Avalanche_Fuji", label: "Avalanche", sub: "Fuji Testnet", color: "#E84142", icon: "▲",
     chainIdHex: "0xa869",
     usdc:        "0x5425890298aed601595a70AB815c96711a31Bc65",
+    // Fuji TokenMessengerV2 — same CREATE2 address as other testnets
     messenger:   "0x8fe6b999dc680ccfdd5bf7eb0974218be2542daa",
+    // Fuji MessageTransmitterV2 — confirmed by Circle docs (Sepolia→Fuji quickstart)
     transmitter: "0xe737e5cebeeba77efe34d4aa090756590b1ce275",
     rpc:         "https://api.avax-test.network/ext/bc/C/rpc",
     explorer:    "https://testnet.snowtrace.io",
     domain:      1,
-    nativeCurrency: { name: "AVAX", symbol: "AVAX", decimals: 18 },  // thêm dòng này
+    nativeCurrency: { name: "AVAX", symbol: "AVAX", decimals: 18 },
   },
 ];
 type Chain = typeof CHAINS[0];
@@ -171,15 +183,17 @@ async function pollAttestationV2(
   srcDomain: number,
   burnTxHash: string,
   onStatus: (s: string) => void,
-  maxWait = 600000,
+  maxWait = 1800000, // 30 minutes
 ): Promise<{ message: string; attestation: string } | null> {
   const url = `https://iris-api-sandbox.circle.com/v2/messages/${srcDomain}?transactionHash=${burnTxHash}`;
   const start = Date.now();
   let attempt = 0;
   while (Date.now() - start < maxWait) {
     attempt++;
-    onStatus(`Waiting for Circle attestation… (attempt ${attempt})`);
-    await new Promise(r => setTimeout(r, 8000));
+    const elapsed = Math.floor((Date.now() - start) / 1000);
+    const elapsedStr = elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed/60)}m ${elapsed%60}s`;
+    onStatus(`Waiting for Circle attestation… ${elapsedStr} elapsed`);
+    await new Promise(r => setTimeout(r, 12000));
     try {
       const res = await fetch(url, { method: "GET" });
       if (res.ok) {
@@ -188,7 +202,7 @@ async function pollAttestationV2(
         if (msg?.status === "complete" && msg?.attestation) {
           return { message: msg.message as string, attestation: msg.attestation as string };
         }
-        if (msg?.status) onStatus(`Attestation: ${msg.status}… (attempt ${attempt})`);
+        if (msg?.status) onStatus(`Attestation status: ${msg.status} — ${elapsedStr} elapsed`);
       }
     } catch {}
   }
@@ -218,6 +232,7 @@ export default function BridgePage() {
   const [srcBal, setSrcBal] = useState<number | null>(null);
   const [txLinks, setTxLinks] = useState<{ burnTx?: string; mintTx?: string; fromExplorer?: string; toExplorer?: string; toLabel?: string } | null>(null);
   const [errorMsg, setErrorMsg] = useState("");
+  const [attestStart, setAttestStart] = useState<number|null>(null); // timestamp when attestation started
 
   const from     = CHAINS.find(c => c.id === fromId)!;
   const to       = CHAINS.find(c => c.id === toId)!;
@@ -226,7 +241,7 @@ export default function BridgePage() {
   const loading  = step !== "idle" && step !== "done" && step !== "error";
   const canBridge = wallet.connected && amtN > 0 && !samePair && !loading;
 
-  function reset() { setStep("idle"); setAmount(""); setSrcBal(null); setTxLinks(null); setErrorMsg(""); setStat(""); }
+  function reset() { setStep("idle"); setAmount(""); setSrcBal(null); setTxLinks(null); setErrorMsg(""); setStat(""); setAttestStart(null); }
 
   async function fetchSrcBal() {
     if (!wallet.connected) return;
@@ -305,14 +320,14 @@ Recipient: ${wallet.address}`);
       // Uses: GET /v2/messages/{srcDomain}?transactionHash={burnTxHash}
       // No need to extract logs or compute message hash manually!
       setStep("attesting");
-      setStat("Waiting for Circle attestation (this takes ~5–10 minutes)…");
+      setAttestStart(Date.now());
+      setStat("Waiting for Circle attestation — this usually takes 5–20 minutes on testnet…");
       const attestResult = await pollAttestationV2(from.domain, burnTx, setStat);
       if (!attestResult) {
         throw new Error(
-          "Circle attestation timed out after 10 minutes.\n" +
-          "The burn TX is confirmed on-chain.\n" +
-          "You can complete the mint manually at: https://app.circle.com/transfer\n" +
-          `Burn TX: ${from.explorer}/tx/${burnTx}`
+          "Circle attestation timed out after 30 minutes. " +
+          "Your funds are safe — the burn TX is confirmed on-chain. " +
+          `Complete the mint manually at https://app.circle.com/transfer using Burn TX: ${from.explorer}/tx/${burnTx}`
         );
       }
 

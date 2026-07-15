@@ -13,14 +13,24 @@ const MAX_U256 = BigInt("0xfffffffffffffffffffffffffffffffffffffffffffffffffffff
 const GAS_APPROVE = "0x186A0";
 const GAS_SWAP    = "0x493E0";
 
-const ALL_TOKENS = ["USDC", "EURC", "cirBTC"] as const;
-type TokenSym = typeof ALL_TOKENS[number];
+const BASE_TOKENS = ["USDC", "EURC", "cirBTC"] as const;
+type BaseToken = typeof BASE_TOKENS[number];
 
-const TOKEN_META: Record<string, { color: string; bg: string; label: string; decimals: number }> = {
+interface CustomToken { sym: string; addr: string; decimals: number; color: string; label: string; }
+type TokenSym = BaseToken | string;
+
+const DEFAULT_TOKEN_META: Record<string, { color: string; bg: string; label: string; decimals: number }> = {
   USDC:   { color: "#2775CA", bg: "rgba(39,117,202,0.15)",  label: "USD Coin",       decimals: 6 },
   EURC:   { color: "#2B5EDD", bg: "rgba(43,94,221,0.15)",   label: "Euro Coin",       decimals: 6 },
   cirBTC: { color: "#F7931A", bg: "rgba(247,147,26,0.15)",  label: "Circle Bitcoin",  decimals: 8 },
 };
+
+// Generate a deterministic color from token address
+function addrColor(addr: string): string {
+  const n = parseInt(addr.slice(2, 8), 16);
+  const h = n % 360;
+  return `hsl(${h}, 65%, 50%)`;
+}
 
 // Route map — 2-hop when no direct pair exists
 const ROUTES: Record<string, string[]> = {
@@ -88,10 +98,10 @@ async function waitTx(hash: string, maxMs=90000): Promise<boolean> {
 }
 
 // ── Token Icon ────────────────────────────────────────────────────────────────
-function TokenIcon({ sym, size=28 }: { sym: string; size?: number }) {
-  const m = TOKEN_META[sym];
+function TokenIcon({ sym, size=28, meta }: { sym: string; size?: number; meta?: Record<string,{color:string}> }) {
+  const m = (meta ?? DEFAULT_TOKEN_META)[sym];
   return (
-    <div style={{ width:size, height:size, borderRadius:"50%", background:m?.color ?? "#666", display:"flex", alignItems:"center", justifyContent:"center", fontSize:size*0.38, fontWeight:800, color:"#fff", flexShrink:0, letterSpacing:"-0.5px" }}>
+    <div style={{ width:size, height:size, borderRadius:"50%", background:m?.color ?? "#888", display:"flex", alignItems:"center", justifyContent:"center", fontSize:size*0.38, fontWeight:800, color:"#fff", flexShrink:0, letterSpacing:"-0.5px" }}>
       {sym === "cirBTC" ? "₿" : sym.slice(0,2)}
     </div>
   );
@@ -99,14 +109,16 @@ function TokenIcon({ sym, size=28 }: { sym: string; size?: number }) {
 
 // ── Token Selector dropdown ───────────────────────────────────────────────────
 // Each selector manages its own open state — avoids event conflict with document listeners
-function TokenSelector({ sym, onChange, active, closeOther, registerClose }: {
+function TokenSelector({ sym, onChange, active, closeOther, registerClose, tokenMeta, allTokens }: {
   sym: string; onChange: (s: TokenSym)=>void; active?: boolean;
   closeOther: ()=>void; registerClose: (fn: ()=>void)=>void;
+  tokenMeta: Record<string,{color:string;bg:string;label:string;decimals:number}>;
+  allTokens: string[];
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
-  const m = TOKEN_META[sym];
-  const options = ALL_TOKENS.filter(t => t !== sym);
+  const m = tokenMeta[sym];
+  const options = allTokens.filter(t => t !== sym);
 
   // Register close function so parent can close this dropdown
   useEffect(()=>{ registerClose(()=>setOpen(false)); },[]);
@@ -142,15 +154,144 @@ function TokenSelector({ sym, onChange, active, closeOther, registerClose }: {
               style={{ width:"100%", display:"flex", alignItems:"center", gap:10, padding:"11px 14px", background:"transparent", border:"none", borderBottom: i < options.length-1 ? "1px solid var(--border)" : "none", cursor:"pointer", transition:"background 0.1s" }}
               onMouseEnter={e=>(e.currentTarget.style.background="var(--bg2)")}
               onMouseLeave={e=>(e.currentTarget.style.background="transparent")}>
-              <TokenIcon sym={t} size={22}/>
+              <TokenIcon sym={t} size={22} meta={tokenMeta}/>
               <div style={{ textAlign:"left" }}>
                 <div style={{ fontWeight:700, fontSize:13, color:"var(--text0)" }}>{t}</div>
-                <div style={{ fontSize:11, color:"var(--text2)" }}>{TOKEN_META[t].label}</div>
+                <div style={{ fontSize:11, color:"var(--text2)" }}>{tokenMeta[t]?.label ?? t}</div>
               </div>
             </button>
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Add Custom Token Modal ────────────────────────────────────────────────────
+function AddTokenModal({ onClose, onAdd, tokenMeta }: {
+  onClose: ()=>void;
+  onAdd: (t: CustomToken)=>void;
+  tokenMeta: Record<string, { color:string; bg:string; label:string; decimals:number }>;
+}) {
+  const [addr,    setAddr]    = useState("");
+  const [sym,     setSym]     = useState("");
+  const [decimals,setDec]     = useState("");
+  const [name,    setName]    = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error,   setError]   = useState("");
+
+  async function lookup() {
+    if (!addr.match(/^0x[0-9a-fA-F]{40}$/)) { setError("Invalid contract address"); return; }
+    setLoading(true); setError("");
+    try {
+      function pad(v: string) { return v.toLowerCase().replace("0x","").padStart(64,"0"); }
+      async function call(data: string) {
+        const r = await fetch("https://rpc.testnet.arc.network", {
+          method:"POST", headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({jsonrpc:"2.0",id:1,method:"eth_call",params:[{to:addr,data},"latest"]}),
+        });
+        return (await r.json()).result ?? null;
+      }
+      // symbol() → bytes32 or string
+      const symRaw = await call("0x95d89b41");
+      // decimals() → uint8
+      const decRaw = await call("0x313ce567");
+      // name() → string
+      const nameRaw = await call("0x06fdde03");
+
+      if (!symRaw || symRaw === "0x") { setError("Not a valid ERC-20 on Arc Testnet"); return; }
+
+      // Decode symbol (may be bytes32 or ABI-encoded string)
+      let symDecoded = "";
+      try {
+        const hex = symRaw.replace("0x","");
+        if (hex.length === 64) {
+          // bytes32 fixed
+          symDecoded = Buffer.from(hex.replace(/00+$/, ""), "hex").toString("utf8").replace(/ /g,"");
+        } else {
+          // ABI string: offset(32) + length(32) + data
+          const len = parseInt(hex.slice(64,128), 16);
+          symDecoded = Buffer.from(hex.slice(128, 128 + len*2), "hex").toString("utf8");
+        }
+      } catch { symDecoded = "???"; }
+
+      // Decode name
+      let nameDecoded = symDecoded;
+      try {
+        const hex = (nameRaw??"").replace("0x","");
+        if (hex.length > 128) {
+          const len = parseInt(hex.slice(64,128), 16);
+          nameDecoded = Buffer.from(hex.slice(128, 128 + len*2), "hex").toString("utf8");
+        }
+      } catch {}
+
+      const dec = decRaw ? parseInt(decRaw, 16) : 18;
+      setSym(symDecoded); setDec(String(dec)); setName(nameDecoded);
+    } catch (e: any) {
+      setError(e.message ?? "Lookup failed");
+    } finally { setLoading(false); }
+  }
+
+  function handleAdd() {
+    if (!sym || !addr) return;
+    const color = addrColor(addr);
+    const token: CustomToken = {
+      sym, addr, decimals: parseInt(decimals)||18,
+      color, label: name || sym,
+    };
+    onAdd(token);
+    onClose();
+  }
+
+  return (
+    <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.6)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:1000 }}>
+      <div style={{ background:"var(--bg1)", border:"1px solid var(--border)", borderRadius:20, padding:24, width:340, boxShadow:"0 16px 48px rgba(0,0,0,0.5)" }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:18 }}>
+          <h3 style={{ margin:0, fontSize:16, fontWeight:800 }}>Add Custom Token</h3>
+          <button onClick={onClose} style={{ background:"none", border:"none", color:"var(--text2)", cursor:"pointer", fontSize:20, lineHeight:1 }}>×</button>
+        </div>
+
+        {/* Contract address input */}
+        <div style={{ marginBottom:12 }}>
+          <div style={{ fontSize:11, color:"var(--text2)", fontFamily:"var(--mono)", textTransform:"uppercase", letterSpacing:"0.5px", marginBottom:6 }}>Token Contract Address</div>
+          <div style={{ display:"flex", gap:8 }}>
+            <input value={addr} onChange={e=>{ setAddr(e.target.value); setSym(""); setDec(""); setName(""); setError(""); }}
+              placeholder="0x…"
+              style={{ flex:1, background:"var(--bg2)", border:"1px solid var(--border)", borderRadius:10, padding:"9px 12px", fontSize:12, color:"var(--text0)", fontFamily:"var(--mono)", outline:"none" }}/>
+            <button onClick={lookup} disabled={loading}
+              style={{ padding:"9px 14px", borderRadius:10, border:"1px solid var(--border)", background:"var(--bg2)", color:"var(--cyan)", fontFamily:"var(--mono)", fontSize:12, fontWeight:700, cursor:loading?"not-allowed":"pointer" }}>
+              {loading ? "…" : "Lookup"}
+            </button>
+          </div>
+          {error && <div style={{ fontSize:11, color:"var(--red)", fontFamily:"var(--mono)", marginTop:6 }}>{error}</div>}
+        </div>
+
+        {/* Token info preview */}
+        {sym && (
+          <div style={{ background:"var(--bg2)", border:"1px solid var(--border)", borderRadius:12, padding:"12px 14px", marginBottom:16 }}>
+            <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:8 }}>
+              <div style={{ width:32, height:32, borderRadius:"50%", background:addrColor(addr), display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, fontWeight:800, color:"#fff" }}>
+                {sym.slice(0,2)}
+              </div>
+              <div>
+                <div style={{ fontWeight:800, fontSize:14 }}>{sym}</div>
+                <div style={{ fontSize:11, color:"var(--text2)" }}>{name}</div>
+              </div>
+            </div>
+            <div style={{ fontSize:12, fontFamily:"var(--mono)", color:"var(--text2)" }}>
+              Decimals: <strong style={{ color:"var(--text1)" }}>{decimals}</strong>
+              <span style={{ marginLeft:12 }}>Address: {addr.slice(0,10)}…</span>
+            </div>
+            {tokenMeta[sym] && <div style={{ fontSize:11, color:"#f59e0b", marginTop:6, fontFamily:"var(--mono)" }}>⚠ Token "{sym}" already exists</div>}
+          </div>
+        )}
+
+        <button onClick={handleAdd} disabled={!sym || !!tokenMeta[sym]}
+          className={!sym || !!tokenMeta[sym] ? "swap-btn disabled-state" : "swap-btn ready"}
+          style={{ margin:0, fontSize:14 }}>
+          Add {sym || "Token"}
+        </button>
+      </div>
     </div>
   );
 }
@@ -164,15 +305,64 @@ export default function SwapPage() {
   const [estimating, setEstimating] = useState(false);
   const [loading,  setLoading]  = useState(false);
   const [status,   setStatus]   = useState("");
-  const [txHistory, setTxHistory] = useState<{ hash:string; amtOut:string; amtIn:number; tokenIn:string; tokenOut:string; ts:number }[]>([]);
-  const [slippage, setSlippage] = useState(0.5);
-  const [showSlip, setShowSlip] = useState(false);
-  const [reserves, setReserves] = useState<{ usdc:number; eurc:number }|null>(null);
+  const [txHistory, setTxHistory] = useState<{ hash:string; amtOut:string; amtIn:number; tokenIn:string; tokenOut:string; ts:number }[]>(()=>{
+    // Load from localStorage on first render
+    try { const s = localStorage.getItem("matrix_swap_history"); return s ? JSON.parse(s) : []; } catch { return []; }
+  });
 
-  const debounce = useRef<ReturnType<typeof setTimeout>|null>(null);
+  // Persist tx history to localStorage whenever it changes
+  useEffect(()=>{
+    try { localStorage.setItem("matrix_swap_history", JSON.stringify(txHistory)); } catch {}
+  }, [txHistory]);
+  const [slippage,    setSlippage]    = useState(0.5);
+  const [showSlip,    setShowSlip]    = useState(false);
+  const [reserves,    setReserves]    = useState<{ usdc:number; eurc:number }|null>(null);
+  const [showAddToken,setShowAddToken]= useState(false);
+  const [customTokens,setCustomTokens]= useState<CustomToken[]>(()=>{
+    try { const s=localStorage.getItem("matrix_custom_tokens"); return s?JSON.parse(s):[]; } catch { return []; }
+  });
+
+  // Build dynamic TOKEN_META merging defaults + custom tokens
+  const TOKEN_META = {
+    ...DEFAULT_TOKEN_META,
+    ...Object.fromEntries(customTokens.map(t=>([t.sym, { color:t.color, bg:`${t.color}26`, label:t.label, decimals:t.decimals }]))),
+  };
+
+  // Build dynamic ALL_TOKENS list
+  const ALL_TOKENS: string[] = [...BASE_TOKENS, ...customTokens.map(t=>t.sym)];
+
+  // Build dynamic ROUTES — add custom token routes via USDC
+  const ROUTES_DYNAMIC: Record<string, string[]> = {
+    ...ROUTES,
+    ...Object.fromEntries(customTokens.flatMap(t=>[
+      [`USDC-${t.sym}`,  [USDC, t.addr]],
+      [`${t.sym}-USDC`,  [t.addr, USDC]],
+      [`EURC-${t.sym}`,  [EURC, USDC, t.addr]],
+      [`${t.sym}-EURC`,  [t.addr, USDC, EURC]],
+      [`cirBTC-${t.sym}`,[cirBTC, USDC, t.addr]],
+      [`${t.sym}-cirBTC`,[t.addr, USDC, cirBTC]],
+    ])),
+  };
+
+  // Persist custom tokens to localStorage
+  useEffect(()=>{
+    try { localStorage.setItem("matrix_custom_tokens", JSON.stringify(customTokens)); } catch {}
+  },[customTokens]);
+
+  function addCustomToken(t: CustomToken) {
+    setCustomTokens(prev=>[...prev.filter(x=>x.sym!==t.sym), t]);
+  }
+  function removeCustomToken(sym: string) {
+    setCustomTokens(prev=>prev.filter(t=>t.sym!==sym));
+    if (tokenIn===sym)  setTokenIn("USDC");
+    if (tokenOut===sym) setTokenOut("EURC");
+  }
+
+  const debounce  = useRef<ReturnType<typeof setTimeout>|null>(null);
+  const refreshTimer = useRef<ReturnType<typeof setInterval>|null>(null);
 
   const routeKey    = `${tokenIn}-${tokenOut}`;
-  const path        = ROUTES[routeKey] ?? [USDC, EURC];
+  const path        = ROUTES_DYNAMIC[routeKey] ?? [USDC, EURC];
   const isMultiHop  = path.length > 2;
   const tokenInDec  = TOKEN_META[tokenIn]?.decimals  ?? 6;
   const tokenOutDec = TOKEN_META[tokenOut]?.decimals ?? 6;
@@ -218,6 +408,30 @@ export default function SwapPage() {
     },500);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   },[amountIn, tokenIn, tokenOut]);
+
+  // Auto-refresh quote every 15 seconds when amount is entered
+  useEffect(()=>{
+    if (refreshTimer.current) clearInterval(refreshTimer.current);
+    if (!amtNum || amtNum <= 0) return;
+    refreshTimer.current = setInterval(async ()=>{
+      if (loading) return; // skip refresh during active swap
+      try {
+        const amtInRaw = toUnits(amtNum, tokenInDec);
+        const data = encodeGetAmountsOut(amtInRaw, path);
+        const r:any = await rpcCall("eth_call",[{ to:ROUTER, data },"latest"]);
+        if (!r||r==="0x") return;
+        const hex = r.replace("0x","");
+        const lastIdx = 128 + (path.length - 1) * 64;
+        const amtOutRaw = BigInt("0x"+hex.slice(lastIdx, lastIdx+64));
+        const amtOut = Number(amtOutRaw)/10**tokenOutDec;
+        const rate   = (amtOut/amtNum).toFixed(tokenOutDec===8?8:6);
+        const impact = (Math.abs(1-amtOut/amtNum)*100).toFixed(2);
+        setEstimate({ amtOut:amtOut.toFixed(tokenOutDec===8?8:6), rate, impact });
+      } catch {}
+    }, 15000);
+    return ()=>{ if (refreshTimer.current) clearInterval(refreshTimer.current); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[amtNum, tokenIn, tokenOut, loading]);
 
   async function handleSwap(e: React.FormEvent) {
     e.preventDefault();
@@ -289,6 +503,14 @@ export default function SwapPage() {
           }
         </div>
 
+        <div style={{ display:"flex", gap:8 }}>
+        {/* Add custom token button */}
+        <button type="button" onClick={()=>setShowAddToken(true)}
+          title="Add custom token"
+          style={{ width:36, height:36, borderRadius:10, border:"1px solid var(--border)", background:"var(--bg2)", color:"var(--text2)", cursor:"pointer", fontSize:18, display:"flex", alignItems:"center", justifyContent:"center" }}>
+          +
+        </button>
+
         {/* Slippage gear */}
         <div style={{ position:"relative" }}>
           <button type="button" onClick={()=>setShowSlip(s=>!s)}
@@ -309,7 +531,30 @@ export default function SwapPage() {
             </div>
           )}
         </div>
+        </div>
       </div>
+
+      {/* Add custom token modal */}
+      {showAddToken && (
+        <AddTokenModal
+          onClose={()=>setShowAddToken(false)}
+          onAdd={addCustomToken}
+          tokenMeta={TOKEN_META}
+        />
+      )}
+
+      {/* Custom token list (removable) */}
+      {customTokens.length > 0 && (
+        <div style={{ display:"flex", gap:6, flexWrap:"wrap", marginBottom:12 }}>
+          {customTokens.map(t=>(
+            <div key={t.sym} style={{ display:"flex", alignItems:"center", gap:5, padding:"3px 10px 3px 8px", borderRadius:20, background:"var(--bg2)", border:"1px solid var(--border)", fontSize:12, fontFamily:"var(--mono)" }}>
+              <div style={{ width:14, height:14, borderRadius:"50%", background:t.color }}/>
+              <span style={{ color:"var(--text1)", fontWeight:700 }}>{t.sym}</span>
+              <button onClick={()=>removeCustomToken(t.sym)} style={{ background:"none", border:"none", color:"var(--text2)", cursor:"pointer", fontSize:14, lineHeight:1, padding:"0 0 0 2px" }}>×</button>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Main card */}
       <form onSubmit={handleSwap}>
@@ -333,6 +578,8 @@ export default function SwapPage() {
               <TokenSelector sym={tokenIn}
                 closeOther={()=>closeOutRef.current()}
                 registerClose={(fn)=>{ closeInRef.current=fn; }}
+                tokenMeta={TOKEN_META}
+                allTokens={ALL_TOKENS}
                 onChange={(s)=>{
                   if (s===tokenOut) setTokenOut(tokenIn);
                   setTokenIn(s); setAmountIn(""); setEstimate(null);
@@ -383,6 +630,8 @@ export default function SwapPage() {
               <TokenSelector sym={tokenOut}
                 closeOther={()=>closeInRef.current()}
                 registerClose={(fn)=>{ closeOutRef.current=fn; }}
+                tokenMeta={TOKEN_META}
+                allTokens={ALL_TOKENS}
                 onChange={(s)=>{
                   if (s===tokenIn) setTokenIn(tokenOut);
                   setTokenOut(s); setEstimate(null);
@@ -392,9 +641,17 @@ export default function SwapPage() {
 
             {/* Rate details */}
             {estimate && !estimating && (
-              <div className="fade-in" style={{ marginTop:12, paddingTop:12, borderTop:"1px solid var(--border)", display:"flex", justifyContent:"space-between", fontSize:12, fontFamily:"var(--mono)", color:"var(--text2)" }}>
-                <span>1 {tokenIn} = {estimate.rate} {tokenOut}</span>
-                <span style={{ color:impactColor(estimate.impact) }}>Impact: {estimate.impact}%</span>
+              <div className="fade-in" style={{ marginTop:12, paddingTop:12, borderTop:"1px solid var(--border)", fontSize:12, fontFamily:"var(--mono)", color:"var(--text2)" }}>
+                <div style={{ display:"flex", justifyContent:"space-between", marginBottom:4 }}>
+                  <span>1 {tokenIn} = {estimate.rate} {tokenOut}</span>
+                  <span style={{ color:impactColor(estimate.impact) }}>Impact: {estimate.impact}%</span>
+                </div>
+                {isMultiHop && <div style={{ fontSize:10, color:"#a855f7", marginTop:2 }}>Route: {tokenIn} → USDC → {tokenOut}</div>}
+              </div>
+            )}
+            {estimating && amtNum>0 && (
+              <div style={{ marginTop:8, fontSize:11, color:"var(--text2)", fontFamily:"var(--mono)" }}>
+                <span className="spinner" style={{ borderTopColor:"var(--cyan)", width:10, height:10, borderWidth:1.5 }}/> Refreshing quote…
               </div>
             )}
           </div>

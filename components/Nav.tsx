@@ -6,10 +6,11 @@ import { useWallet, getBal } from "./WalletProvider";
 import WalletModal from "./WalletModal";
 
 const LINKS = [
-  { href:"/swap",    label:"Exchange"    },
-  { href:"/pool",   label:"Pools"       },
-  { href:"/bridge", label:"Bridge"      },
-  { href:"/send",   label:"Send Tokens" },
+  { href:"/swap",      label:"Exchange"   },
+  { href:"/pool",      label:"Pools"      },
+  { href:"/bridge",    label:"Bridge"     },
+  { href:"/send",      label:"Send Tokens"},
+  { href:"/portfolio", label:"Portfolio"  },
 ];
 
 const CHAINS = [
@@ -24,11 +25,12 @@ function fmt(n:number, dec=4){ if(n===0)return "0"; if(n<0.00000001)return "<0.0
 export default function Nav() {
   const path = usePathname();
   const { wallet, disconnect, openModal } = useWallet();
-  const [gas,        setGas]      = useState(8);
-  const [menuOpen,   setMenu]     = useState(false);
-  const [chainOpen,  setChainOpen]= useState(false);
-  const [currentHex, setCurrentHex] = useState<string|null>(null);
-  const [copied, setCopied] = useState(false);
+  const [gas,         setGas]       = useState(8);
+  const [menuOpen,    setMenu]      = useState(false);
+  const [chainOpen,   setChainOpen] = useState(false);
+  const [currentHex,  setCurrentHex]= useState<string|null>(null);
+  const [copied,      setCopied]    = useState(false);
+  const [nativeBal,   setNativeBal] = useState<number|null>(null); // native token balance for non-Arc chains
   const menuRef  = useRef<HTMLDivElement>(null);
   const chainRef = useRef<HTMLDivElement>(null);
 
@@ -46,6 +48,25 @@ export default function Nav() {
     const id = setInterval(fetchGas, 12000);
     return ()=>clearInterval(id);
   },[currentHex]);
+
+  // Fetch native token balance when on non-Arc chains (ETH on Sepolia, AVAX on Fuji)
+  useEffect(()=>{
+    const isArc = currentHex === "0x4cef52";
+    if (isArc || !wallet.connected || !wallet.address) { setNativeBal(null); return; }
+    const chain = CHAINS.find(c=>c.hex===currentHex);
+    if (!chain) return;
+    async function fetchNativeBal(){
+      try {
+        const res = await fetch(chain!.rpc,{method:"POST",headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({jsonrpc:"2.0",id:1,method:"eth_getBalance",params:[wallet.address,"latest"]})});
+        const j = await res.json();
+        if(j.result){ setNativeBal(Number(BigInt(j.result)) / 1e18); }
+      } catch {}
+    }
+    fetchNativeBal();
+    const id = setInterval(fetchNativeBal, 15000);
+    return ()=>clearInterval(id);
+  },[currentHex, wallet.connected, wallet.address]);
   useEffect(()=>{ const h=(e:MouseEvent)=>{ if(menuRef.current&&!menuRef.current.contains(e.target as Node))setMenu(false); if(chainRef.current&&!chainRef.current.contains(e.target as Node))setChainOpen(false); }; document.addEventListener("mousedown",h); return ()=>document.removeEventListener("mousedown",h); },[]);
 
   // Detect current chain from MetaMask
@@ -149,21 +170,29 @@ export default function Nav() {
                     )}
                   </button>
                 </div>
-                {wallet.balancesLoading ? (
-                  <div style={{padding:"10px 12px",fontSize:12,color:"var(--text2)",fontFamily:"var(--mono)",display:"flex",gap:6}}>
-                    <span className="spinner" style={{borderTopColor:"var(--cyan)"}}/>Loading…
-                  </div>
-                ) : (
-                  [["USDC",4],["EURC",4],["cirBTC",8]].map(([sym,dec])=>(
-                    <div key={sym as string} className="menu-bal">
-                      <span className="mk">{sym}</span>
-                      <span style={{fontFamily:"var(--mono)"}}>{fmt(getBal(wallet.balances,sym as string),dec as number)}</span>
+                {currentHex === "0x4cef52" ? (
+                  // Arc chain — show USDC / EURC / cirBTC balances
+                  wallet.balancesLoading ? (
+                    <div style={{padding:"10px 12px",fontSize:12,color:"var(--text2)",fontFamily:"var(--mono)",display:"flex",gap:6}}>
+                      <span className="spinner" style={{borderTopColor:"var(--cyan)"}}/>Loading…
                     </div>
-                  ))
+                  ) : (
+                    [["USDC",4],["EURC",4],["cirBTC",8]].map(([sym,dec])=>(
+                      <div key={sym as string} className="menu-bal">
+                        <span className="mk">{sym}</span>
+                        <span style={{fontFamily:"var(--mono)"}}>{fmt(getBal(wallet.balances,sym as string),dec as number)}</span>
+                      </div>
+                    ))
+                  )
+                ) : (
+                  // Non-Arc chain — show native token balance (ETH / AVAX)
+                  <div className="menu-bal">
+                    <span className="mk">{CHAINS.find(c=>c.hex===currentHex)?.nativeCurrency.symbol ?? "ETH"}</span>
+                    <span style={{fontFamily:"var(--mono)"}}>
+                      {nativeBal !== null ? fmt(nativeBal, 6) : "…"}
+                    </span>
+                  </div>
                 )}
-                <div style={{padding:"2px 12px 6px",fontSize:10,color:"var(--text2)",fontFamily:"var(--mono)"}}>
-                  {wallet.chainId===5042002?"● Arc Network Testnet":`⚠ Chain ID: ${wallet.chainId}`}
-                </div>
                 <hr className="sep"/>
                 <button className="menu-disconnect" onClick={()=>{disconnect();setMenu(false);}}>Disconnect</button>
               </div>
