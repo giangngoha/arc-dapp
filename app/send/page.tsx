@@ -419,7 +419,7 @@ export default function SendPage(){
               </div>
               <textarea
                 rows={7}
-                placeholder={"0xAbc...123, 10\n0xDef...456, 25.5\n0xGhi...789, 10"}
+                placeholder={"0xA1c...6a8, 10\n0xD77...a19, 25.5\n0xG6b...a75, 10"}
                 value={bulkInput}
                 onChange={e=>{setBulkInput(e.target.value);parseBulkInput(e.target.value);setBulkDone(false);}}
                 disabled={bulkRunning}
