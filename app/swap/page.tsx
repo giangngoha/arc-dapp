@@ -305,10 +305,14 @@ export default function SwapPage() {
   const [estimating, setEstimating] = useState(false);
   const [loading,  setLoading]  = useState(false);
   const [status,   setStatus]   = useState("");
-  const [txHistory, setTxHistory] = useState<{ hash:string; amtOut:string; amtIn:number; tokenIn:string; tokenOut:string; ts:number }[]>(()=>{
-    // Load from localStorage on first render
-    try { const s = localStorage.getItem("matrix_swap_history"); return s ? JSON.parse(s) : []; } catch { return []; }
-  });
+  const [txHistory, setTxHistory] = useState<{ hash:string; amtOut:string; amtIn:number; tokenIn:string; tokenOut:string; ts:number }[]>([]);
+  const [hydrated, setHydrated] = useState(false);
+
+  // Load from localStorage after hydration (client-only)
+  useEffect(()=>{
+    try { const s = localStorage.getItem("matrix_swap_history"); if (s) setTxHistory(JSON.parse(s)); } catch {}
+    setHydrated(true);
+  }, []);
 
   // Persist tx history to localStorage whenever it changes
   useEffect(()=>{
@@ -695,8 +699,8 @@ export default function SwapPage() {
         </div>
       </form>
 
-      {/* TX History */}
-      {txHistory.length > 0 && (
+      {/* TX History — only render client-side to avoid hydration mismatch */}
+      {hydrated && txHistory.length > 0 && (
         <div className="fade-in" style={{ marginTop:14 }}>
           <div style={{ fontSize:11, color:"var(--text2)", fontFamily:"var(--mono)", fontWeight:700, textTransform:"uppercase", letterSpacing:"0.6px", marginBottom:8 }}>Recent Transactions</div>
           <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
@@ -709,7 +713,7 @@ export default function SwapPage() {
                       {tx.amtIn} {tx.tokenIn} → ~{tx.amtOut} {tx.tokenOut}
                     </div>
                     <div style={{ fontSize:11, color:"var(--text2)", fontFamily:"var(--mono)", marginTop:2 }}>
-                      {new Date(tx.ts).toLocaleTimeString()}
+                      {new Date(tx.ts).toLocaleTimeString("en-US", { hour:"2-digit", minute:"2-digit", second:"2-digit" })}
                     </div>
                   </div>
                 </div>

@@ -75,4 +75,5 @@ check-pair.mjs
 #back up
 backup_pool-page.tsx
 backup_swap-page.tsx
+backup_send-page.tsx
 

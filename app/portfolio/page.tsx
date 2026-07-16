@@ -4,7 +4,6 @@ import { useWallet } from "@/components/WalletProvider";
 import { ARC_RPC, ARC_EXPLORER, CONTRACTS, TOKEN_META } from "@/lib/contracts";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-const FACTORY = "0x8994A0b7E383bd62341319b22A198dEF7154ff9F";
 const ROUTER  = "0x29E0C2A0780196792dECc9183Dd5aA540c955BDf";
 
 const TOKENS = [
@@ -14,19 +13,34 @@ const TOKENS = [
   { sym:"cirBTC", addr:CONTRACTS.cirBTC, decimals:8, color:"#F7931A", price:0     },
 ];
 
+// Hardcoded pair addresses — avoids Factory lookup which can hit rate limits
 const POOLS = [
-  { id:"usdc-eurc",   tA:"USDC", tB:"EURC",   label:"USDC / EURC"   },
-  { id:"usdc-cirbtc", tA:"USDC", tB:"cirBTC", label:"USDC / cirBTC" },
-  { id:"eurc-cirbtc", tA:"EURC", tB:"cirBTC", label:"EURC / cirBTC" },
+  { id:"usdc-eurc",   tA:"USDC", tB:"EURC",   label:"USDC / EURC",   pair:"0x5eFf76b80A58ea34b23d0981bCCe2E639171c9cb" },
+  { id:"usdc-cirbtc", tA:"USDC", tB:"cirBTC", label:"USDC / cirBTC", pair:"0xa1d507a9662012bd43bf1ba5e03989d750a8c069" },
+  { id:"eurc-cirbtc", tA:"EURC", tB:"cirBTC", label:"EURC / cirBTC", pair:"0x4404ec28d88768e3d36c3f8b981f662aba09d1c0" },
 ];
 
 // ─── RPC helpers ─────────────────────────────────────────────────────────────
-async function rpc(method: string, params: unknown[]) {
-  const r = await fetch(ARC_RPC, {
-    method:"POST", headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({ jsonrpc:"2.0", id:1, method, params }),
-  });
-  return (await r.json()).result ?? null;
+async function rpc(method: string, params: unknown[], retries=4): Promise<string|null> {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const r = await fetch(ARC_RPC, {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ jsonrpc:"2.0", id:1, method, params }),
+      });
+      const j = await r.json();
+      if (!j.error) return j.result ?? null;
+      const msg: string = j.error.message ?? "";
+      if (/rate|limit|too many/i.test(msg)) {
+        if (i < retries - 1) { await new Promise(res => setTimeout(res, 1000 * (i + 1))); continue; }
+        return null; // silent fail
+      }
+      return null;
+    } catch {
+      if (i < retries - 1) await new Promise(res => setTimeout(res, 1000 * (i + 1)));
+    }
+  }
+  return null;
 }
 
 function pad(v: string, isAddr=false) {
@@ -36,7 +50,6 @@ function pad(v: string, isAddr=false) {
 
 const encodeBalOf   = (a:string) => "0x70a08231"+pad(a,true);
 const encodeTotSup  = ()         => "0x18160ddd";
-const encodeGetPair = (a:string, b:string) => "0xe6a43905"+pad(a,true)+pad(b,true);
 const encodeGetRes  = ()         => "0x0902f1ac";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -79,44 +92,39 @@ export default function PortfolioPage() {
     if (!wallet.connected || !wallet.address) return;
     setLoading(true);
     try {
-      // ── 1. Token balances ──────────────────────────────────────────────────
-      const balRaws = await Promise.all(
-        TOKENS.map(t => rpc("eth_call", [{ to:t.addr, data:encodeBalOf(wallet.address) }, "latest"]))
-      );
-      const tokenData: TokenBalance[] = TOKENS.map((t, i) => {
-        const raw = balRaws[i];
+      // ── 1. Token balances — sequential to avoid rate limit ─────────────────
+      const tokenData: TokenBalance[] = [];
+      for (const t of TOKENS) {
+        const raw = await rpc("eth_call", [{ to:t.addr, data:encodeBalOf(wallet.address) }, "latest"]);
         const balance = raw && raw !== "0x" ? Number(BigInt(raw)) / 10**t.decimals : 0;
-        return { ...t, balance, valueUSD: balance * t.price };
-      });
+        tokenData.push({ ...t, balance, valueUSD: balance * t.price });
+      }
       setTokens(tokenData);
 
-      // ── 2. LP positions ────────────────────────────────────────────────────
+      // ── 2. LP positions — use hardcoded pair addresses ─────────────────────
       const lpData: LPPosition[] = [];
-      await Promise.all(POOLS.map(async pool => {
+      for (const pool of POOLS) {
         const tA = TOKENS.find(t=>t.sym===pool.tA)!;
         const tB = TOKENS.find(t=>t.sym===pool.tB)!;
         try {
-          // Get pair address from Factory
-          const pairRaw = await rpc("eth_call", [{ to:FACTORY, data:encodeGetPair(tA.addr, tB.addr) }, "latest"]);
-          const pair = "0x" + (pairRaw??"").slice(-40);
-          if (pair === "0x0000000000000000000000000000000000000000") return;
+          const pair = pool.pair;
 
-          // Get LP balance, total supply, reserves in parallel
-          const [lpBalRaw, totSupRaw, resRaw] = await Promise.all([
-            rpc("eth_call", [{ to:pair, data:encodeBalOf(wallet.address) }, "latest"]),
-            rpc("eth_call", [{ to:pair, data:encodeTotSup() }, "latest"]),
-            rpc("eth_call", [{ to:pair, data:encodeGetRes() }, "latest"]),
-          ]);
+          // Sequential calls to avoid rate limit
+          const lpBalRaw  = await rpc("eth_call", [{ to:pair, data:encodeBalOf(wallet.address) }, "latest"]);
+          const totSupRaw = await rpc("eth_call", [{ to:pair, data:encodeTotSup() }, "latest"]);
+          const resRaw    = await rpc("eth_call", [{ to:pair, data:encodeGetRes() }, "latest"]);
 
-          const lpBal   = lpBalRaw  && lpBalRaw!=="0x"  ? Number(BigInt(lpBalRaw))  / 1e18 : 0;
-          const totSup  = totSupRaw && totSupRaw!=="0x" ? Number(BigInt(totSupRaw)) / 1e18 : 0;
-          if (lpBal === 0 || totSup === 0) return;
+          const lpBal  = lpBalRaw  && lpBalRaw!=="0x"  ? Number(BigInt(lpBalRaw))  / 1e18 : 0;
+          const totSup = totSupRaw && totSupRaw!=="0x" ? Number(BigInt(totSupRaw)) / 1e18 : 0;
+          if (lpBal === 0 || totSup === 0) continue;
 
           const sharePct = lpBal / totSup * 100;
-          const hex = (resRaw as string).replace("0x","");
+          const hex = (resRaw ?? "").replace("0x","");
           const aIsToken0 = tA.addr.toLowerCase() < tB.addr.toLowerCase();
-          const r0 = hex.length>=64  ? Number(BigInt("0x"+hex.slice(0,64)))  / 10**tA.decimals : 0;
-          const r1 = hex.length>=128 ? Number(BigInt("0x"+hex.slice(64,128))) / 10**tB.decimals : 0;
+          const dec0 = aIsToken0 ? tA.decimals : tB.decimals;
+          const dec1 = aIsToken0 ? tB.decimals : tA.decimals;
+          const r0 = hex.length>=64  ? Number(BigInt("0x"+hex.slice(0,64)))   / 10**dec0 : 0;
+          const r1 = hex.length>=128 ? Number(BigInt("0x"+hex.slice(64,128))) / 10**dec1 : 0;
           const resA = aIsToken0 ? r0 : r1;
           const resB = aIsToken0 ? r1 : r0;
           const valueA = resA * (sharePct/100);
@@ -125,7 +133,7 @@ export default function PortfolioPage() {
 
           lpData.push({ id:pool.id, label:pool.label, pair, tA:pool.tA, tB:pool.tB, lpBal, sharePct, valueA, valueB, valueUSD });
         } catch {}
-      }));
+      }
       setLpPos(lpData.sort((a,b)=>b.valueUSD-a.valueUSD));
       setLastRefresh(new Date());
     } catch (e) { console.error(e); }

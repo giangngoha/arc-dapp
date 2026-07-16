@@ -1,26 +1,16 @@
 "use client";
-import { useState } from "react";
-import { useWallet} from "@/components/WalletProvider";
+import { useState, useEffect, useRef, useCallback } from "react";
+import { useWallet } from "@/components/WalletProvider";
 import { showToast } from "@/components/Toast";
 import { toUnits, encodeApprove, encodeAllowance } from "@/lib/contracts";
 
 // ─── Contract addresses from Circle official docs ────────────────────────────
-// Sources:
-//   Sepolia→Arc:  https://developers.circle.com/cctp/quickstarts/transfer-usdc-ethereum-to-arc
-//   Sepolia→Fuji: https://developers.circle.com/cctp/transfer-usdc-on-testnet-from-ethereum-to-avalanche
-//
-// CCTP V2 uses CREATE2 so TokenMessengerV2 = 0x8fe6b999... on ALL testnet EVM chains.
-// MessageTransmitterV2 = 0xe737e5ce... on ALL testnet EVM chains (confirmed by Circle docs).
-//
-// Domain IDs: Sepolia=0, Fuji=1, Arc=26
 const CHAINS = [
   {
     id: "Arc_Testnet", label: "Arc Testnet", sub: "Arc (0x4cef52)", color: "#00b4d8", icon: "A",
     chainIdHex: "0x4cef52",
     usdc:        "0x3600000000000000000000000000000000000000",
-    // Arc TokenMessengerV2 — burn USDC when Arc is SOURCE chain
     messenger:   "0x8fe6b999dc680ccfdd5bf7eb0974218be2542daa",
-    // Arc MessageTransmitterV2 — mint USDC when Arc is DESTINATION chain
     transmitter: "0xe737e5cebeeba77efe34d4aa090756590b1ce275",
     rpc:         "https://rpc.testnet.arc.network",
     explorer:    "https://testnet.arcscan.app",
@@ -31,9 +21,7 @@ const CHAINS = [
     id: "Ethereum_Sepolia", label: "Ethereum", sub: "Sepolia Testnet", color: "#627EEA", icon: "Ξ",
     chainIdHex: "0xaa36a7",
     usdc:        "0x1c7d4b196cb0c7b01d743fbc6116a902379c7238",
-    // Sepolia TokenMessengerV2 — confirmed by Circle docs
     messenger:   "0x8fe6b999dc680ccfdd5bf7eb0974218be2542daa",
-    // Sepolia MessageTransmitterV2 — confirmed by Circle docs
     transmitter: "0xe737e5cebeeba77efe34d4aa090756590b1ce275",
     rpc:         "https://ethereum-sepolia-rpc.publicnode.com",
     explorer:    "https://sepolia.etherscan.io",
@@ -44,9 +32,7 @@ const CHAINS = [
     id: "Avalanche_Fuji", label: "Avalanche", sub: "Fuji Testnet", color: "#E84142", icon: "▲",
     chainIdHex: "0xa869",
     usdc:        "0x5425890298aed601595a70AB815c96711a31Bc65",
-    // Fuji TokenMessengerV2 — same CREATE2 address as other testnets
     messenger:   "0x8fe6b999dc680ccfdd5bf7eb0974218be2542daa",
-    // Fuji MessageTransmitterV2 — confirmed by Circle docs (Sepolia→Fuji quickstart)
     transmitter: "0xe737e5cebeeba77efe34d4aa090756590b1ce275",
     rpc:         "https://api.avax-test.network/ext/bc/C/rpc",
     explorer:    "https://testnet.snowtrace.io",
@@ -57,43 +43,58 @@ const CHAINS = [
 type Chain = typeof CHAINS[0];
 type BridgeStep = "idle" | "approving" | "burning" | "attesting" | "minting" | "done" | "error";
 
+// ─── Pending Bridge type (persisted to localStorage) ─────────────────────────
+interface PendingBridge {
+  id:           string;   // uuid
+  burnTxHash:   string;
+  srcChainId:   string;
+  destChainId:  string;
+  srcDomain:    number;
+  amount:       string;   // "1.00"
+  burnedAt:     number;   // Date.now()
+  fromExplorer: string;
+  toExplorer:   string;
+  // filled in after attestation
+  status: "attesting" | "ready" | "minting" | "completed" | "failed";
+  message?:     string;
+  attestation?: string;
+  mintTxHash?:  string;
+}
+
+const LS_KEY = "matrix_pending_bridges";
+
+function loadPending(): PendingBridge[] {
+  try { const s = localStorage.getItem(LS_KEY); return s ? JSON.parse(s) : []; } catch { return []; }
+}
+function savePending(list: PendingBridge[]) {
+  try { localStorage.setItem(LS_KEY, JSON.stringify(list)); } catch {}
+}
+function uid() { return Math.random().toString(36).slice(2, 10); }
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 const MAX_UINT256 = BigInt("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
-// Destination caller = bytes32(0) → any address can call receiveMessage
 const DEST_CALLER_BYTES32 = "0x0000000000000000000000000000000000000000000000000000000000000000";
-// maxFee = 500 subunits = 0.0005 USDC (per Circle docs example)
-const MAX_FEE = 500n;
-// minFinalityThreshold = 1000 → Fast Transfer
+const MAX_FEE     = 500n;
 const MIN_FINALITY = 1000;
+// Start polling Circle API after 5 minutes (won't be ready before that on testnet)
+const POLL_DELAY_MS  = 5 * 60 * 1000;
+const POLL_INTERVAL_MS = 30 * 1000;
 
-// ─── ABI Encoders (CCTP V2) ──────────────────────────────────────────────────
-// depositForBurn(uint256 amount, uint32 destinationDomain, bytes32 mintRecipient,
-//               address burnToken, bytes32 destinationCaller, uint256 maxFee,
-//               uint32 minFinalityThreshold)
-// selector: keccak256("depositForBurn(uint256,uint32,bytes32,address,bytes32,uint256,uint32)")[0:4]
-function encodeDepositForBurnV2(
-  amount: bigint,
-  destDomain: number,
-  recipient: string, // EVM address → padded to bytes32
-  burnToken: string,
-  maxFee: bigint,
-  minFinalityThreshold: number,
-): string {
-  // bytes32 recipient: 0x000...000{address}
+// ─── ABI Encoders ────────────────────────────────────────────────────────────
+function encodeDepositForBurnV2(amount: bigint, destDomain: number, recipient: string, burnToken: string, maxFee: bigint, minFinalityThreshold: number): string {
   const recipientBytes32 = "000000000000000000000000" + recipient.toLowerCase().replace("0x", "");
   return (
-    "0x8e0250ee" + // selector: keccak256("depositForBurn(uint256,uint32,bytes32,address,bytes32,uint256,uint32)")[0:4] = 0x8e0250ee
+    "0x8e0250ee" +
     amount.toString(16).padStart(64, "0") +
     destDomain.toString(16).padStart(64, "0") +
     recipientBytes32.padStart(64, "0") +
     burnToken.toLowerCase().replace("0x", "").padStart(64, "0") +
-    DEST_CALLER_BYTES32.replace("0x", "") + // destinationCaller = 0
+    DEST_CALLER_BYTES32.replace("0x", "") +
     maxFee.toString(16).padStart(64, "0") +
     minFinalityThreshold.toString(16).padStart(64, "0")
   );
 }
 
-// receiveMessage(bytes message, bytes attestation)
 function encodeReceiveMessage(message: string, attestation: string): string {
   const msgHex = message.replace("0x", "");
   const attHex = attestation.replace("0x", "");
@@ -104,19 +105,16 @@ function encodeReceiveMessage(message: string, attestation: string): string {
   const attPadded = attHex.padEnd(Math.ceil(attLen / 32) * 64, "0");
   return (
     "0x57ecfd28" +
-    (64).toString(16).padStart(64, "0") + // offset1 = 64
+    (64).toString(16).padStart(64, "0") +
     off2 +
     msgLen.toString(16).padStart(64, "0") + msgPadded +
     attLen.toString(16).padStart(64, "0") + attPadded
   );
 }
 
-// ─── RPC helpers ──────────────────────────────────────────────────────────────
+// ─── RPC helpers ─────────────────────────────────────────────────────────────
 async function rpcCall(url: string, method: string, params: unknown[]): Promise<unknown> {
-  const res = await fetch(url, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
-  });
+  const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) });
   const j = await res.json();
   if (j.error) throw new Error(j.error.message ?? JSON.stringify(j.error));
   return j.result;
@@ -132,66 +130,35 @@ async function switchToChain(chain: Chain) {
     await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: chain.chainIdHex }] });
   } catch (e: any) {
     if (e.code === 4902) {
-      await eth.request({
-        method: "wallet_addEthereumChain",
-        params: [{
-          chainId: chain.chainIdHex,
-          chainName: chain.label + " " + chain.sub,
-          nativeCurrency: chain.nativeCurrency,
-          rpcUrls: [chain.rpc],
-          blockExplorerUrls: [chain.explorer],
-        }],
-      });
+      await eth.request({ method: "wallet_addEthereumChain", params: [{ chainId: chain.chainIdHex, chainName: chain.label + " " + chain.sub, nativeCurrency: chain.nativeCurrency, rpcUrls: [chain.rpc], blockExplorerUrls: [chain.explorer] }] });
     } else throw e;
   }
-  // Wait until wallet confirms the switch
   for (let i = 0; i < 30; i++) {
     await new Promise(r => setTimeout(r, 500));
-    try {
-      const c = await eth.request({ method: "eth_chainId" });
-      if (c?.toLowerCase() === chain.chainIdHex.toLowerCase()) return;
-    } catch {}
+    try { const c = await eth.request({ method: "eth_chainId" }); if (c?.toLowerCase() === chain.chainIdHex.toLowerCase()) return; } catch {}
   }
   throw new Error(`Wallet did not switch to ${chain.label}. Please switch manually.`);
 }
 
-// Poll tx receipt via direct RPC (avoids MetaMask being on wrong chain)
 async function waitTxRpc(rpcUrl: string, hash: string, maxWait = 120000): Promise<boolean> {
   const start = Date.now();
   while (Date.now() - start < maxWait) {
     await new Promise(r => setTimeout(r, 3000));
-    try {
-      const r: any = await rpcCall(rpcUrl, "eth_getTransactionReceipt", [hash]);
-      if (r?.status) return r.status === "0x1";
-    } catch {}
+    try { const r: any = await rpcCall(rpcUrl, "eth_getTransactionReceipt", [hash]); if (r?.status) return r.status === "0x1"; } catch {}
   }
   return false;
 }
 
 async function checkAllowance(rpcUrl: string, token: string, owner: string, spender: string): Promise<bigint> {
-  try {
-    const r: any = await rpcCall(rpcUrl, "eth_call", [{ to: token, data: encodeAllowance(owner, spender) }, "latest"]);
-    return r && r !== "0x" ? BigInt(r) : 0n;
-  } catch { return 0n; }
+  try { const r: any = await rpcCall(rpcUrl, "eth_call", [{ to: token, data: encodeAllowance(owner, spender) }, "latest"]); return r && r !== "0x" ? BigInt(r) : 0n; } catch { return 0n; }
 }
 
-// ─── Attestation via Circle V2 API ───────────────────────────────────────────
-// Source: https://developers.circle.com/cctp/quickstarts/transfer-usdc-ethereum-to-arc
-// GET /v2/messages/{srcDomain}?transactionHash={burnTxHash}
-// Returns messages[0].message + messages[0].attestation when status === "complete"
-async function pollAttestationV2(
-  srcDomain: number,
-  burnTxHash: string,
-  onStatus: (s: string) => void,
-  maxWait = 1800000, // 30 minutes
-): Promise<{ message: string; attestation: string } | null> {
+async function pollAttestationV2(srcDomain: number, burnTxHash: string, onStatus: (s: string) => void, maxWait = 1800000): Promise<{ message: string; attestation: string } | null> {
   const url = `https://iris-api-sandbox.circle.com/v2/messages/${srcDomain}?transactionHash=${burnTxHash}`;
   const start = Date.now();
-  let attempt = 0;
   while (Date.now() - start < maxWait) {
-    attempt++;
     const elapsed = Math.floor((Date.now() - start) / 1000);
-    const elapsedStr = elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed/60)}m ${elapsed%60}s`;
+    const elapsedStr = elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`;
     onStatus(`Waiting for Circle attestation… ${elapsedStr} elapsed`);
     await new Promise(r => setTimeout(r, 12000));
     try {
@@ -199,9 +166,7 @@ async function pollAttestationV2(
       if (res.ok) {
         const j = await res.json();
         const msg = j?.messages?.[0];
-        if (msg?.status === "complete" && msg?.attestation) {
-          return { message: msg.message as string, attestation: msg.attestation as string };
-        }
+        if (msg?.status === "complete" && msg?.attestation) return { message: msg.message as string, attestation: msg.attestation as string };
         if (msg?.status) onStatus(`Attestation status: ${msg.status} — ${elapsedStr} elapsed`);
       }
     } catch {}
@@ -209,7 +174,29 @@ async function pollAttestationV2(
   return null;
 }
 
-// ─── UI ───────────────────────────────────────────────────────────────────────
+// Check attestation once (for background tracker)
+async function checkAttestationOnce(srcDomain: number, burnTxHash: string): Promise<{ message: string; attestation: string } | null> {
+  try {
+    const url = `https://iris-api-sandbox.circle.com/v2/messages/${srcDomain}?transactionHash=${burnTxHash}`;
+    const res = await fetch(url, { method: "GET" });
+    if (!res.ok) return null;
+    const j = await res.json();
+    const msg = j?.messages?.[0];
+    if (msg?.status === "complete" && msg?.attestation) return { message: msg.message as string, attestation: msg.attestation as string };
+  } catch {}
+  return null;
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+function fmtElapsed(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const rem = s % 60;
+  return `${m}m ${rem.toString().padStart(2, "0")}s`;
+}
+
+// ─── UI components ────────────────────────────────────────────────────────────
 function ChainCard({ chain, selected, onClick }: { chain: Chain; selected: boolean; onClick: () => void }) {
   return (
     <button type="button" onClick={onClick} style={{ flex: 1, padding: "14px 8px", borderRadius: 14, border: "1px solid", borderColor: selected ? chain.color + "99" : "var(--border)", background: selected ? chain.color + "18" : "var(--bg2)", cursor: "pointer", transition: "all 0.2s", display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
@@ -220,28 +207,223 @@ function ChainCard({ chain, selected, onClick }: { chain: Chain; selected: boole
   );
 }
 
+// ─── Pending Bridge Card ──────────────────────────────────────────────────────
+function PendingBridgeCard({
+  bridge, now, onMint, onDismiss,
+}: {
+  bridge: PendingBridge;
+  now: number;
+  onMint: (b: PendingBridge) => void;
+  onDismiss: (id: string) => void;
+}) {
+  const src  = CHAINS.find(c => c.id === bridge.srcChainId)!;
+  const dest = CHAINS.find(c => c.id === bridge.destChainId)!;
+  const elapsed = now - bridge.burnedAt;
+  const pollStartsIn = Math.max(0, POLL_DELAY_MS - elapsed);
+
+  const isReady    = bridge.status === "ready";
+  const isMinting  = bridge.status === "minting";
+  const isDone     = bridge.status === "completed";
+  const isFailed   = bridge.status === "failed";
+  const isAttesting = bridge.status === "attesting";
+
+  const borderColor = isDone ? "rgba(0,200,150,0.3)" : isReady ? "rgba(0,229,255,0.4)" : isFailed ? "rgba(224,65,90,0.3)" : "var(--border)";
+  const bgColor     = isDone ? "rgba(0,200,150,0.04)" : isReady ? "rgba(0,229,255,0.06)" : "var(--bg1)";
+
+  return (
+    <div className="fade-in" style={{ background: bgColor, border: `1px solid ${borderColor}`, borderRadius: 14, padding: "14px 16px" }}>
+      {/* Header row */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {/* Chain icons */}
+          <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+            <div style={{ width: 22, height: 22, borderRadius: "50%", background: src?.color ?? "#888", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 800, color: "#fff" }}>{src?.icon}</div>
+            <span style={{ fontSize: 11, color: "var(--text2)" }}>→</span>
+            <div style={{ width: 22, height: 22, borderRadius: "50%", background: dest?.color ?? "#888", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 800, color: "#fff" }}>{dest?.icon}</div>
+          </div>
+          <span style={{ fontSize: 13, fontWeight: 700, fontFamily: "var(--mono)" }}>{bridge.amount} USDC</span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {/* Status badge */}
+          {isDone && <span style={{ fontSize: 10, padding: "2px 8px", borderRadius: 20, background: "rgba(0,200,150,0.15)", color: "var(--green)", fontFamily: "var(--mono)", fontWeight: 700 }}>✓ Done</span>}
+          {isReady && <span style={{ fontSize: 10, padding: "2px 8px", borderRadius: 20, background: "rgba(0,229,255,0.15)", color: "var(--cyan)", fontFamily: "var(--mono)", fontWeight: 700 }}>Ready to Mint</span>}
+          {isMinting && <span style={{ fontSize: 10, padding: "2px 8px", borderRadius: 20, background: "rgba(0,229,255,0.1)", color: "var(--cyan)", fontFamily: "var(--mono)", fontWeight: 700 }}>Minting…</span>}
+          {isFailed && <span style={{ fontSize: 10, padding: "2px 8px", borderRadius: 20, background: "rgba(224,65,90,0.12)", color: "var(--red)", fontFamily: "var(--mono)", fontWeight: 700 }}>Failed</span>}
+          {isAttesting && <span style={{ fontSize: 10, padding: "2px 8px", borderRadius: 20, background: "var(--bg3)", color: "var(--text2)", fontFamily: "var(--mono)", fontWeight: 700 }}>Attesting</span>}
+          {/* Dismiss button for completed/failed */}
+          {(isDone || isFailed) && (
+            <button onClick={() => onDismiss(bridge.id)} style={{ background: "none", border: "none", color: "var(--text2)", cursor: "pointer", fontSize: 16, lineHeight: 1, padding: 0 }}>×</button>
+          )}
+        </div>
+      </div>
+
+      {/* Timer + info row */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: isReady || isMinting ? 10 : 0 }}>
+        <div style={{ fontFamily: "var(--mono)", fontSize: 12 }}>
+          {isDone ? (
+            <span style={{ color: "var(--green)" }}>Completed in {fmtElapsed(elapsed)}</span>
+          ) : isFailed ? (
+            <span style={{ color: "var(--red)" }}>Failed after {fmtElapsed(elapsed)}</span>
+          ) : (
+            <span style={{ color: "var(--text2)" }}>
+              ⏱ <strong style={{ color: "var(--text1)", fontVariantNumeric: "tabular-nums" }}>{fmtElapsed(elapsed)}</strong>
+              {isAttesting && pollStartsIn > 0 && (
+                <span style={{ color: "var(--text2)", marginLeft: 6 }}>· polling starts in {fmtElapsed(pollStartsIn)}</span>
+              )}
+              {isAttesting && pollStartsIn === 0 && (
+                <span style={{ color: "var(--cyan)", marginLeft: 6 }}>· checking attestation…</span>
+              )}
+            </span>
+          )}
+        </div>
+        <a href={`${bridge.fromExplorer}/tx/${bridge.burnTxHash}`} target="_blank" rel="noopener noreferrer"
+          style={{ fontSize: 11, color: "var(--text2)", fontFamily: "var(--mono)", textDecoration: "none" }}>
+          {bridge.burnTxHash.slice(0, 8)}…{bridge.burnTxHash.slice(-6)} ↗
+        </a>
+      </div>
+
+      {/* Mint Now button */}
+      {isReady && (
+        <button onClick={() => onMint(bridge)}
+          className="swap-btn ready"
+          style={{ margin: 0, fontSize: 13, padding: "10px 0", background: "linear-gradient(90deg, #00b4d8, #0077b6)" }}>
+          🟢 Mint Now on {dest?.label}
+        </button>
+      )}
+
+      {isMinting && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "var(--cyan)", fontFamily: "var(--mono)", padding: "6px 0" }}>
+          <span className="spinner" style={{ borderTopColor: "var(--cyan)" }} />Minting USDC on {dest?.label}…
+        </div>
+      )}
+
+      {isDone && bridge.mintTxHash && (
+        <a href={`${bridge.toExplorer}/tx/${bridge.mintTxHash}`} target="_blank" rel="noopener noreferrer"
+          style={{ fontSize: 12, color: "var(--green)", fontFamily: "var(--mono)", textDecoration: "none", display: "block", marginTop: 6 }}>
+          Mint TX: {bridge.mintTxHash.slice(0, 8)}…{bridge.mintTxHash.slice(-6)} ↗
+        </a>
+      )}
+    </div>
+  );
+}
+
 const STEP_ORDER: BridgeStep[] = ["approving", "burning", "attesting", "minting", "done"];
 
+// ─── Main page ────────────────────────────────────────────────────────────────
 export default function BridgePage() {
   const { wallet, openModal } = useWallet();
-  const [fromId, setFromId] = useState("Arc_Testnet");
-  const [toId,   setToId]   = useState("Ethereum_Sepolia");
-  const [amount, setAmount] = useState("");
-  const [step,   setStep]   = useState<BridgeStep>("idle");
-  const [status, setStat]   = useState("");
-  const [srcBal, setSrcBal] = useState<number | null>(null);
-  const [txLinks, setTxLinks] = useState<{ burnTx?: string; mintTx?: string; fromExplorer?: string; toExplorer?: string; toLabel?: string } | null>(null);
+  const [fromId,   setFromId]  = useState("Arc_Testnet");
+  const [toId,     setToId]    = useState("Ethereum_Sepolia");
+  const [amount,   setAmount]  = useState("");
+  const [step,     setStep]    = useState<BridgeStep>("idle");
+  const [status,   setStat]    = useState("");
+  const [srcBal,   setSrcBal]  = useState<number | null>(null);
+  const [txLinks,  setTxLinks] = useState<{ burnTx?: string; mintTx?: string; fromExplorer?: string; toExplorer?: string; toLabel?: string } | null>(null);
   const [errorMsg, setErrorMsg] = useState("");
-  const [attestStart, setAttestStart] = useState<number|null>(null); // timestamp when attestation started
 
-  const from     = CHAINS.find(c => c.id === fromId)!;
-  const to       = CHAINS.find(c => c.id === toId)!;
+  // ── Pending bridges state ──────────────────────────────────────────────────
+  const [pending,  setPending] = useState<PendingBridge[]>([]);
+  const [now,      setNow]     = useState(Date.now());
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Load from localStorage on mount
+  useEffect(() => {
+    setPending(loadPending());
+  }, []);
+
+  // Tick every second for the elapsed timer
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  // Background polling: check Circle API for each attesting bridge
+  // Only starts polling after POLL_DELAY_MS (5 min) since burn
+  const checkPending = useCallback(async () => {
+    const list = loadPending();
+    let changed = false;
+    const updated = await Promise.all(list.map(async (b) => {
+      if (b.status !== "attesting") return b;
+      const elapsed = Date.now() - b.burnedAt;
+      if (elapsed < POLL_DELAY_MS) return b; // too early
+      const result = await checkAttestationOnce(b.srcDomain, b.burnTxHash);
+      if (result) {
+        changed = true;
+        return { ...b, status: "ready" as const, message: result.message, attestation: result.attestation };
+      }
+      return b;
+    }));
+    if (changed) {
+      savePending(updated);
+      setPending(updated);
+      showToast(true, "Attestation Ready ✓", "A bridge is ready to mint!");
+    }
+  }, []);
+
+  // Start/stop polling interval
+  useEffect(() => {
+    if (pollRef.current) clearInterval(pollRef.current);
+    const hasAttesting = pending.some(b => b.status === "attesting");
+    if (!hasAttesting) return;
+    pollRef.current = setInterval(checkPending, POLL_INTERVAL_MS);
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+  }, [pending, checkPending]);
+
+  function updatePending(list: PendingBridge[]) {
+    savePending(list);
+    setPending(list);
+  }
+
+  function addPending(b: PendingBridge) {
+    const list = [...loadPending(), b];
+    updatePending(list);
+  }
+
+  function mutatePending(id: string, patch: Partial<PendingBridge>) {
+    const list = loadPending().map(b => b.id === id ? { ...b, ...patch } : b);
+    updatePending(list);
+  }
+
+  function dismissPending(id: string) {
+    updatePending(loadPending().filter(b => b.id !== id));
+  }
+
+  // ── Mint handler (from tracker) ────────────────────────────────────────────
+  async function handleMint(bridge: PendingBridge) {
+    if (!wallet.connected) { openModal(); return; }
+    if (!bridge.message || !bridge.attestation) return;
+    const dest = CHAINS.find(c => c.id === bridge.destChainId)!;
+    mutatePending(bridge.id, { status: "minting" });
+    const eth = (window as any).ethereum;
+    try {
+      await switchToChain(dest);
+      const mintData = encodeReceiveMessage(bridge.message, bridge.attestation);
+      const mintTx: string = await eth.request({ method: "eth_sendTransaction", params: [{ from: wallet.address, to: dest.transmitter, data: mintData, gas: "0x493E0" }] });
+      const ok = await waitTxRpc(dest.rpc, mintTx, 120000);
+      if (!ok) throw new Error("receiveMessage failed on-chain.");
+      mutatePending(bridge.id, { status: "completed", mintTxHash: mintTx });
+      showToast(true, "Mint Complete ✓", `${bridge.amount} USDC minted on ${dest.label}!`);
+    } catch (err: any) {
+      const msg = err?.message || String(err);
+      if (msg.includes("4001") || /reject|denied|cancel/i.test(msg)) {
+        mutatePending(bridge.id, { status: "ready" }); // revert to ready so user can retry
+        showToast(false, "Cancelled", "Rejected in wallet.");
+      } else {
+        mutatePending(bridge.id, { status: "failed" });
+        showToast(false, "Mint Failed", msg.slice(0, 100));
+      }
+    }
+  }
+
+  // ── Bridge form helpers ────────────────────────────────────────────────────
+  const from = CHAINS.find(c => c.id === fromId)!;
+  const to   = CHAINS.find(c => c.id === toId)!;
   const amtN     = parseFloat(amount) || 0;
   const samePair = fromId === toId;
   const loading  = step !== "idle" && step !== "done" && step !== "error";
   const canBridge = wallet.connected && amtN > 0 && !samePair && !loading;
 
-  function reset() { setStep("idle"); setAmount(""); setSrcBal(null); setTxLinks(null); setErrorMsg(""); setStat(""); setAttestStart(null); }
+  function reset() { setStep("idle"); setAmount(""); setSrcBal(null); setTxLinks(null); setErrorMsg(""); setStat(""); }
 
   async function fetchSrcBal() {
     if (!wallet.connected) return;
@@ -259,7 +441,7 @@ export default function BridgePage() {
     const eth = (window as any).ethereum;
 
     try {
-      // ── 1. Approve ──────────────────────────────────────────────────────────
+      // ── 1. Approve ────────────────────────────────────────────────────────
       setStep("approving");
       setStat(`Switching to ${from.label}…`);
       await switchToChain(from);
@@ -270,81 +452,68 @@ export default function BridgePage() {
       const allowance = await checkAllowance(from.rpc, from.usdc, wallet.address, from.messenger);
       if (allowance < amtRaw) {
         setStat(`Approving USDC on ${from.label} — confirm in wallet…`);
-        const approveTx: string = await eth.request({
-          method: "eth_sendTransaction",
-          params: [{ from: wallet.address, to: from.usdc, data: encodeApprove(from.messenger, MAX_UINT256), gas: "0x186A0" }],
-        });
+        const approveTx: string = await eth.request({ method: "eth_sendTransaction", params: [{ from: wallet.address, to: from.usdc, data: encodeApprove(from.messenger, MAX_UINT256), gas: "0x186A0" }] });
         setStat("Waiting for approval confirmation…");
-        const ok = await waitTxRpc(from.rpc, approveTx);
-        if (!ok) throw new Error("Approve transaction failed on-chain.");
+        if (!await waitTxRpc(from.rpc, approveTx)) throw new Error("Approve transaction failed on-chain.");
       } else {
         setStat("USDC already approved ✓");
         await new Promise(r => setTimeout(r, 500));
       }
 
-      // ── 2. depositForBurn (CCTP V2 — 7 params) ─────────────────────────────
+      // ── 2. depositForBurn ─────────────────────────────────────────────────
       setStep("burning");
-      setStat(`Burning USDC on ${from.label} — confirm in wallet…`);
       const burnData = encodeDepositForBurnV2(amtRaw, to.domain, wallet.address, from.usdc, MAX_FEE, MIN_FINALITY);
 
-      // Simulate first to catch revert reason before asking wallet to sign
       setStat("Simulating burn TX…");
       try {
-        const sim: any = await rpcCall(from.rpc, "eth_call", [{
-          from: wallet.address, to: from.messenger, data: burnData, gas: "0x493E0"
-        }, "latest"]);
-        console.log("[Bridge] Simulation result:", sim);
+        await rpcCall(from.rpc, "eth_call", [{ from: wallet.address, to: from.messenger, data: burnData, gas: "0x493E0" }, "latest"]);
       } catch (simErr: any) {
-        const simMsg = simErr?.message || String(simErr);
-        throw new Error(`depositForBurn would revert: ${simMsg}
-
-Messenger: ${from.messenger}
-Domain: ${to.domain}
-Amount: ${amtRaw} (${amtN} USDC)
-Recipient: ${wallet.address}`);
+        throw new Error(`depositForBurn would revert: ${simErr?.message ?? simErr}`);
       }
 
       setStat(`Burning USDC on ${from.label} — confirm in wallet…`);
-      const burnTx: string = await eth.request({
-        method: "eth_sendTransaction",
-        params: [{ from: wallet.address, to: from.messenger, data: burnData, gas: "0x493E0" }],
-      });
-      setStat(`Burn TX sent — waiting for confirmation…`);
-      const burnOk = await waitTxRpc(from.rpc, burnTx, 90000);
-      if (!burnOk) throw new Error(`depositForBurn failed.\nCheck: ${from.explorer}/tx/${burnTx}`);
+      const burnTx: string = await eth.request({ method: "eth_sendTransaction", params: [{ from: wallet.address, to: from.messenger, data: burnData, gas: "0x493E0" }] });
+      setStat("Burn TX sent — waiting for confirmation…");
+      if (!await waitTxRpc(from.rpc, burnTx, 90000)) throw new Error(`depositForBurn failed. Check: ${from.explorer}/tx/${burnTx}`);
 
       setTxLinks({ burnTx, fromExplorer: from.explorer, toExplorer: to.explorer, toLabel: to.label });
-      showToast(true, "Burn Confirmed ✓", "Fetching Circle attestation…");
+      showToast(true, "Burn Confirmed ✓", "Tracking attestation in background…");
 
-      // ── 3. Poll Circle Iris V2 API ──────────────────────────────────────────
-      // Uses: GET /v2/messages/{srcDomain}?transactionHash={burnTxHash}
-      // No need to extract logs or compute message hash manually!
+      // ── Save to pending tracker ───────────────────────────────────────────
+      const pendingEntry: PendingBridge = {
+        id: uid(), burnTxHash: burnTx, srcChainId: from.id, destChainId: to.id,
+        srcDomain: from.domain, amount: amtN.toFixed(2), burnedAt: Date.now(),
+        fromExplorer: from.explorer, toExplorer: to.explorer, status: "attesting",
+      };
+      addPending(pendingEntry);
+
+      // ── 3. Poll attestation (in-session, full wait) ───────────────────────
       setStep("attesting");
-      setAttestStart(Date.now());
       setStat("Waiting for Circle attestation — this usually takes 5–20 minutes on testnet…");
       const attestResult = await pollAttestationV2(from.domain, burnTx, setStat);
       if (!attestResult) {
-        throw new Error(
-          "Circle attestation timed out after 30 minutes. " +
-          "Your funds are safe — the burn TX is confirmed on-chain. " +
-          `Complete the mint manually at https://app.circle.com/transfer using Burn TX: ${from.explorer}/tx/${burnTx}`
-        );
+        // Timed out — but saved to tracker, user can mint later
+        mutatePending(pendingEntry.id, { status: "attesting" }); // keep as attesting for tracker
+        showToast(false, "Attestation Timeout", "Bridge saved — check Status Tracker below to mint later.");
+        setStep("error");
+        setErrorMsg("Circle attestation timed out. Your burn is confirmed — use the Bridge Status Tracker below to complete the mint when ready.");
+        return;
       }
 
-      // ── 4. receiveMessage on destination ────────────────────────────────────
+      // Update pending to ready (will be used if mint fails and user retries)
+      mutatePending(pendingEntry.id, { status: "ready", message: attestResult.message, attestation: attestResult.attestation });
+
+      // ── 4. receiveMessage ─────────────────────────────────────────────────
       setStep("minting");
       setStat(`Switching to ${to.label}…`);
       await switchToChain(to);
       setStat(`Minting USDC on ${to.label} — confirm in wallet…`);
       const mintData = encodeReceiveMessage(attestResult.message, attestResult.attestation);
-      const mintTx: string = await eth.request({
-        method: "eth_sendTransaction",
-        params: [{ from: wallet.address, to: to.transmitter, data: mintData, gas: "0x493E0" }],
-      });
+      const mintTx: string = await eth.request({ method: "eth_sendTransaction", params: [{ from: wallet.address, to: to.transmitter, data: mintData, gas: "0x493E0" }] });
       setStat("Waiting for mint confirmation…");
-      const mintOk = await waitTxRpc(to.rpc, mintTx, 120000);
-      if (!mintOk) throw new Error(`receiveMessage failed on ${to.label}.\nCheck: ${to.explorer}/tx/${mintTx}`);
+      if (!await waitTxRpc(to.rpc, mintTx, 120000)) throw new Error(`receiveMessage failed. Check: ${to.explorer}/tx/${mintTx}`);
 
+      mutatePending(pendingEntry.id, { status: "completed", mintTxHash: mintTx });
       setTxLinks(prev => ({ ...prev, mintTx }));
       setStep("done");
       setStat("Bridge complete!");
@@ -367,6 +536,7 @@ Recipient: ${wallet.address}`);
 
   const stepDone   = (s: BridgeStep) => STEP_ORDER.indexOf(step) > STEP_ORDER.indexOf(s) || step === "done";
   const stepActive = (s: BridgeStep) => step === s;
+  const activePending = pending.filter(b => b.status !== "completed" || Date.now() - b.burnedAt < 3600000);
 
   return (
     <div className="fade-in" style={{ maxWidth: 520, margin: "0 auto", padding: "20px 24px" }}>
@@ -384,7 +554,7 @@ Recipient: ${wallet.address}`);
           </div>
         </div>
 
-        {/* Flip button */}
+        {/* Flip */}
         <div style={{ display: "flex", justifyContent: "center", margin: "10px 0" }}>
           <button onClick={() => { const tmp = fromId; setFromId(toId); setToId(tmp); reset(); }}
             style={{ width: 36, height: 36, borderRadius: 10, border: "1px solid var(--border)", background: "var(--bg2)", color: "var(--text1)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18, transition: "all 0.25s" }}
@@ -405,7 +575,6 @@ Recipient: ${wallet.address}`);
           <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
             <div style={{ width: 8, height: 8, borderRadius: "50%", background: from.color, boxShadow: `0 0 5px ${from.color}` }} />
             <span style={{ fontSize: 13, fontWeight: 600 }}>{from.label}</span>
-            
           </div>
           <div style={{ flex: 1, position: "relative", display: "flex", alignItems: "center" }}>
             <div style={{ flex: 1, borderTop: "1px dashed var(--border2)" }} />
@@ -414,13 +583,12 @@ Recipient: ${wallet.address}`);
           <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
             <div style={{ width: 8, height: 8, borderRadius: "50%", background: to.color, boxShadow: `0 0 5px ${to.color}` }} />
             <span style={{ fontSize: 13, fontWeight: 600 }}>{to.label}</span>
-            
           </div>
         </div>
 
         {samePair && <div style={{ background: "rgba(224,65,90,0.08)", border: "1px solid rgba(224,65,90,0.22)", borderRadius: 10, padding: "10px 14px", marginBottom: 14, fontSize: 12, color: "var(--red)", fontFamily: "var(--mono)" }}>⚠ Source and destination must be different.</div>}
 
-        {/* Amount input */}
+        {/* Amount */}
         <div style={{ marginBottom: 20 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
             <p style={{ fontSize: 10, fontWeight: 700, color: "var(--text2)", textTransform: "uppercase", letterSpacing: "0.8px", fontFamily: "var(--mono)" }}>Amount (USDC)</p>
@@ -482,8 +650,7 @@ Recipient: ${wallet.address}`);
             </div>
             {loading && status && (
               <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "var(--cyan)", fontFamily: "var(--mono)" }}>
-                <span className="spinner" style={{ borderTopColor: "var(--cyan)" }} />
-                {status}
+                <span className="spinner" style={{ borderTopColor: "var(--cyan)" }} />{status}
               </div>
             )}
             {step === "done" && <div style={{ fontSize: 13, color: "var(--green)", fontFamily: "var(--mono)", fontWeight: 700 }}>✅ Bridge complete!</div>}
@@ -527,6 +694,33 @@ Recipient: ${wallet.address}`);
               )}
             </>
           )}
+        </div>
+      )}
+
+      {/* ── Bridge Status Tracker ──────────────────────────────────────────── */}
+      {activePending.length > 0 && (
+        <div className="fade-in" style={{ marginTop: 20 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text2)", textTransform: "uppercase", letterSpacing: "0.6px", fontFamily: "var(--mono)" }}>
+              Bridge Status Tracker
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              {/* live indicator dot */}
+              <div style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--cyan)", animation: "pulse 2s infinite" }} />
+              <span style={{ fontSize: 10, color: "var(--text2)", fontFamily: "var(--mono)" }}>live</span>
+            </div>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {activePending.map(b => (
+              <PendingBridgeCard
+                key={b.id}
+                bridge={b}
+                now={now}
+                onMint={handleMint}
+                onDismiss={dismissPending}
+              />
+            ))}
+          </div>
         </div>
       )}
     </div>

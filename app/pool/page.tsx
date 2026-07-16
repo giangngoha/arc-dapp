@@ -14,11 +14,11 @@ const TOKENS = {
   cirBTC: { addr: CONTRACTS.cirBTC, decimals: 8,  color: "#F7931A", label: "cirBTC" },
 };
 
-// Known pool combinations — UI discovers pair address dynamically from Factory
+// Known pool combinations with deployed pair addresses
 const POOL_PAIRS = [
-  { id:"usdc-eurc",   tokenA:"USDC", tokenB:"EURC",   label:"USDC / EURC",   fee:"0.3%" },
-  { id:"usdc-cirbtc", tokenA:"USDC", tokenB:"cirBTC", label:"USDC / cirBTC", fee:"0.3%" },
-  { id:"eurc-cirbtc", tokenA:"EURC", tokenB:"cirBTC", label:"EURC / cirBTC", fee:"0.3%" },
+  { id:"usdc-eurc",   tokenA:"USDC", tokenB:"EURC",   label:"USDC / EURC",   fee:"0.3%", knownPair:"0x5eFf76b80A58ea34b23d0981bCCe2E639171c9cb" },
+  { id:"usdc-cirbtc", tokenA:"USDC", tokenB:"cirBTC", label:"USDC / cirBTC", fee:"0.3%", knownPair:"0xa1d507a9662012bd43bf1ba5e03989d750a8c069" },
+  { id:"eurc-cirbtc", tokenA:"EURC", tokenB:"cirBTC", label:"EURC / cirBTC", fee:"0.3%", knownPair:"0x4404ec28d88768e3d36c3f8b981f662aba09d1c0" },
 ];
 
 type PoolDef = typeof POOL_PAIRS[0] & { pair: string; exists: boolean; fee: string };
@@ -45,13 +45,13 @@ const encodeTotalSupply  = () => "0x18160ddd";
 const encodeBalanceOfLP  = (a:string) => "0x70a08231"+pad32(a,true);
 
 // ─── RPC / helpers ───────────────────────────────────────────────────────────
-// Tính APR từ Swap events trong 24h
+// Calculate APR from Swap events in the last 24h
 // Swap event topic: keccak256("Swap(address,uint256,uint256,uint256,uint256,address)")
 const SWAP_TOPIC = "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822";
 
 async function getVolume24h(pairAddr: string, tokenADecimals: number): Promise<number> {
   try {
-    // Lấy block hiện tại
+    // Get current block number
     const blockHex = await rpc("eth_blockNumber", []) as string;
     const currentBlock = parseInt(blockHex, 16);
     // ~24h = 7200 blocks (Arc ~12s/block)
@@ -63,24 +63,38 @@ async function getVolume24h(pairAddr: string, tokenADecimals: number): Promise<n
       toBlock:   "latest",
     }]);
     if (!logs || !Array.isArray(logs)) return 0;
-    // Mỗi Swap log: amount0In(32) amount1In(32) amount0Out(32) amount1Out(32)
+    // Each Swap log: amount0In(32) amount1In(32) amount0Out(32) amount1Out(32)
     let totalVol = 0;
     for (const log of logs) {
       const d = log.data.replace("0x","");
       if (d.length < 256) continue;
       const a0in  = Number(BigInt("0x"+d.slice(0,64)))   / 10**tokenADecimals;
       const a0out = Number(BigInt("0x"+d.slice(128,192))) / 10**tokenADecimals;
-      totalVol += a0in + a0out; // volume tính theo tokenA (USDC hoặc EURC ≈ 1 USD)
+      totalVol += a0in + a0out; // volume in tokenA units (USDC or EURC ≈ $1)
     }
     return totalVol;
   } catch { return 0; }
 }
 
-async function rpc(method:string,params:unknown[]):Promise<unknown> {
-  const r = await fetch(ARC_RPC,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id:1,method,params})});
-  const j = await r.json();
-  if(j.error) throw new Error(j.error.message??JSON.stringify(j.error));
-  return j.result;
+async function rpc(method:string, params:unknown[], retries=5): Promise<unknown> {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const r = await fetch(ARC_RPC,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id:1,method,params})});
+      const j = await r.json();
+      if (!j.error) return j.result;
+      const msg: string = j.error.message ?? JSON.stringify(j.error);
+      // Rate limit — wait longer each retry
+      if (/rate|limit|too many/i.test(msg)) {
+        if (i < retries - 1) { await new Promise(res => setTimeout(res, 1200 * (i + 1))); continue; }
+        return null; // silent fail after all retries
+      }
+      throw new Error(msg);
+    } catch(e: any) {
+      if (e?.message && !/rate|limit|too many/i.test(e.message)) throw e;
+      if (i < retries - 1) await new Promise(res => setTimeout(res, 1200 * (i + 1)));
+    }
+  }
+  return null;
 }
 async function switchToArc() {
   const eth=(window as any).ethereum; const hex="0x4cef52";
@@ -125,7 +139,7 @@ function PoolCard({pool,onClick}:{pool:PoolDef;onClick:()=>void}) {
         </div>
         <div style={{flex:1}}>
           <div style={{fontWeight:800,fontSize:15}}>{pool.label}</div>
-          <div style={{fontSize:11,color:"var(--text2)",fontFamily:"var(--mono)",marginTop:2}}>Uniswap V2 · {pool.fee}{noPair?" · Pool chưa được tạo":""}</div>
+          <div style={{fontSize:11,color:"var(--text2)",fontFamily:"var(--mono)",marginTop:2}}>Uniswap V2 · {pool.fee}{noPair?" · Pool not yet created":""}</div>
         </div>
         {!noPair && <span style={{color:"var(--cyan)",fontSize:18}}>›</span>}
       </div>
@@ -157,11 +171,13 @@ function PoolDetail({pool,wallet,openModal,refreshBalances,onBack}:{pool:PoolDef
     if(!pool.pair) return;
     setFetch(true);
     try {
-      const [resRaw,supRaw,lpRaw] = await Promise.all([
-        rpc("eth_call",[{to:pool.pair,data:encodeGetReserves()},"latest"]),
-        rpc("eth_call",[{to:pool.pair,data:encodeTotalSupply()},"latest"]),
-        wallet.connected ? rpc("eth_call",[{to:pool.pair,data:encodeBalanceOfLP(wallet.address)},"latest"]) : Promise.resolve("0x0"),
-      ]);
+      // Sequential calls to avoid hitting RPC rate limit
+      const resRaw = await rpc("eth_call",[{to:pool.pair,data:encodeGetReserves()},"latest"]);
+      const supRaw = await rpc("eth_call",[{to:pool.pair,data:encodeTotalSupply()},"latest"]);
+      const lpRaw  = wallet.connected
+        ? await rpc("eth_call",[{to:pool.pair,data:encodeBalanceOfLP(wallet.address)},"latest"])
+        : "0x0";
+      if (!resRaw) { setFetch(false); return; } // RPC returned null (rate limit), skip
       const hex = (resRaw as string).replace("0x","");
       // sort: token with lower address = token0
       // Uniswap V2 sorts tokens by address: lower address = token0
@@ -177,7 +193,7 @@ function PoolDetail({pool,wallet,openModal,refreshBalances,onBack}:{pool:PoolDef
       const sharePct = totalSupply>0 ? userLp/totalSupply*100 : 0;
       // TVL = resA * 2 (assume tokenA ≈ USD, e.g. USDC/EURC both ~$1, cirBTC excluded)
       const tvlUSD = resA * 2;
-      // Volume 24h từ Swap events
+      // Volume 24h from Swap events
       const vol24h = await getVolume24h(pool.pair, tA.decimals);
       // APR = fee 0.3% × volume24h × 365 / TVL
       const apr = tvlUSD > 0 && vol24h > 0 ? (0.003 * vol24h * 365 / tvlUSD * 100) : null;
@@ -465,22 +481,31 @@ export default function PoolPage() {
   const [pools,     setPools]     = useState<PoolDef[]>([]);
   const [discovering, setDiscovering] = useState(true);
 
-  // Dynamically discover pair addresses from Factory
+  // Discover pair addresses — use known addresses first, fallback to Factory call
   useEffect(()=>{
     async function discover() {
       setDiscovering(true);
       const results = await Promise.all(
         POOL_PAIRS.map(async p => {
+          // Use hardcoded address if available
+          if (p.knownPair) {
+            return { ...p, pair: p.knownPair, exists: true };
+          }
+          // Fallback: query Factory
           const tA = TOKENS[p.tokenA as keyof typeof TOKENS].addr;
           const tB = TOKENS[p.tokenB as keyof typeof TOKENS].addr;
-          try {
-            const raw = await rpc("eth_call", [{ to:FACTORY, data:encodeGetPair(tA, tB) }, "latest"]) as string;
-            const addr = "0x" + raw.slice(-40);
-            const exists = addr !== "0x0000000000000000000000000000000000000000";
-            return { ...p, pair: exists ? addr : "", exists };
-          } catch {
-            return { ...p, pair: "", exists: false };
+          for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+              const raw = await rpc("eth_call", [{ to:FACTORY, data:encodeGetPair(tA, tB) }, "latest"]) as string;
+              const hex = raw?.replace("0x","") ?? "";
+              const addr = hex.length >= 40 ? "0x" + hex.slice(-40) : "";
+              const exists = !!addr && addr !== "0x0000000000000000000000000000000000000000";
+              return { ...p, pair: exists ? addr : "", exists };
+            } catch {
+              if (attempt < 2) await new Promise(r => setTimeout(r, 1500));
+            }
           }
+          return { ...p, pair: "", exists: false };
         })
       );
       setPools(results);

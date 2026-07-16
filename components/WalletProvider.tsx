@@ -24,20 +24,48 @@ export function getBal(b: WalletBalances, sym: string): number {
   return (b as unknown as Record<string,number>)[sym] ?? 0;
 }
 
+const ARC_RPC_URL = "https://rpc.testnet.arc.network";
+
+async function rpcFetch(method: string, params: unknown[]): Promise<string|null> {
+  for (let i = 0; i < 4; i++) {
+    try {
+      const res = await fetch(ARC_RPC_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc:"2.0", id:1, method, params }),
+      });
+      const j = await res.json();
+      if (!j.error) return j.result ?? null;
+      const msg: string = j.error.message ?? "";
+      if (/rate|limit|too many/i.test(msg) && i < 3) {
+        await new Promise(r => setTimeout(r, 800 * (i + 1)));
+        continue;
+      }
+      return null;
+    } catch {
+      if (i < 3) await new Promise(r => setTimeout(r, 800 * (i + 1)));
+    }
+  }
+  return null;
+}
+
 async function fetchBal(addr: string): Promise<WalletBalances> {
-  const eth = (window as any).ethereum;
-  if (!eth) return ZERO;
-  const call = async (to: string, data: string) => {
-    try { const r = await eth.request({ method:"eth_call", params:[{to,data},"latest"] }); return r && r!=="0x" ? Number(BigInt(r))/1e6 : 0; } catch { return 0; }
-  };
   const pad = addr.toLowerCase().replace("0x","").padStart(64,"0");
-  const [usdc, eurc, cirbtc, native] = await Promise.all([
-    call("0x3600000000000000000000000000000000000000", "0x70a08231"+pad),
-    call("0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a", "0x70a08231"+pad),
-    (async()=>{ try { const r = await eth.request({method:"eth_call",params:[{to:"0xf0C4a4CE82A5746AbAAd9425360Ab04fbBA432BF",data:"0x70a08231"+pad},"latest"]}); return r&&r!=="0x"?Number(BigInt(r))/1e8:0; } catch{return 0;} })(),
-    (async()=>{ try { const r = await eth.request({method:"eth_getBalance",params:[addr,"latest"]}); return Number(BigInt(r??'0x0'))/1e18; } catch{return 0;} })(),
-  ]);
-  return { USDC:usdc, EURC:eurc, cirBTC:cirbtc, ARC:native, ETH:0 };
+  const parse = (r: string|null, div: number) => r && r !== "0x" ? Number(BigInt(r)) / div : 0;
+
+  // Sequential calls to avoid rate limit on Arc Testnet free RPC
+  const usdcRaw   = await rpcFetch("eth_call", [{to:"0x3600000000000000000000000000000000000000", data:"0x70a08231"+pad}, "latest"]);
+  const eurcRaw   = await rpcFetch("eth_call", [{to:"0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a", data:"0x70a08231"+pad}, "latest"]);
+  const cirbtcRaw = await rpcFetch("eth_call", [{to:"0xf0C4a4CE82A5746AbAAd9425360Ab04fbBA432BF", data:"0x70a08231"+pad}, "latest"]);
+  const nativeRaw = await rpcFetch("eth_getBalance", [addr, "latest"]);
+
+  return {
+    USDC:   parse(usdcRaw,   1e6),
+    EURC:   parse(eurcRaw,   1e6),
+    cirBTC: parse(cirbtcRaw, 1e8),
+    ARC:    parse(nativeRaw, 1e18),
+    ETH:    0,
+  };
 }
 
 export function WalletProvider({ children }: { children: ReactNode }) {
