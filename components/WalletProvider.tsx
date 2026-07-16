@@ -1,5 +1,5 @@
 "use client";
-import { createContext, useContext, useState, useCallback, useEffect, ReactNode } from "react";
+import { createContext, useContext, useState, useCallback, useEffect, useRef, ReactNode } from "react";
 
 export interface WalletBalances {
   ARC: number; USDC: number; EURC: number; cirBTC: number; ETH: number;
@@ -15,10 +15,11 @@ interface WalletCtx {
   refreshBalances: () => Promise<void>;
   updateBalance: (sym: string, delta: number) => void;
   modalOpen: boolean; openModal: () => void; closeModal: () => void;
+  balanceFailed: boolean;
 }
 const ZERO: WalletBalances = { ARC:0, USDC:0, EURC:0, cirBTC:0, ETH:0 };
 const DEFAULT: WalletState = { connected:false, address:"", walletType:"", chainId:0, balancesLoading:false, balances:ZERO };
-const Ctx = createContext<WalletCtx>({ wallet:DEFAULT, connect:async()=>{}, disconnect:()=>{}, refreshBalances:async()=>{}, updateBalance:()=>{}, modalOpen:false, openModal:()=>{}, closeModal:()=>{} });
+const Ctx = createContext<WalletCtx>({ wallet:DEFAULT, connect:async()=>{}, disconnect:()=>{}, refreshBalances:async()=>{}, updateBalance:()=>{}, modalOpen:false, openModal:()=>{}, closeModal:()=>{}, balanceFailed:false });
 
 export function getBal(b: WalletBalances, sym: string): number {
   return (b as unknown as Record<string,number>)[sym] ?? 0;
@@ -27,24 +28,23 @@ export function getBal(b: WalletBalances, sym: string): number {
 const ARC_RPC_URL = "https://rpc.testnet.arc.network";
 
 async function rpcFetch(method: string, params: unknown[]): Promise<string|null> {
-  for (let i = 0; i < 4; i++) {
+  for (let i = 0; i < 2; i++) {
     try {
       const res = await fetch(ARC_RPC_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ jsonrpc:"2.0", id:1, method, params }),
+        signal: AbortSignal.timeout(4000),
       });
       const j = await res.json();
       if (!j.error) return j.result ?? null;
       const msg: string = j.error.message ?? "";
-      if (/rate|limit|too many/i.test(msg) && i < 3) {
-        await new Promise(r => setTimeout(r, 800 * (i + 1)));
+      if (/rate|limit|too many/i.test(msg) && i === 0) {
+        await new Promise(r => setTimeout(r, 500));
         continue;
       }
       return null;
-    } catch {
-      if (i < 3) await new Promise(r => setTimeout(r, 800 * (i + 1)));
-    }
+    } catch { return null; }
   }
   return null;
 }
@@ -53,11 +53,13 @@ async function fetchBal(addr: string): Promise<WalletBalances> {
   const pad = addr.toLowerCase().replace("0x","").padStart(64,"0");
   const parse = (r: string|null, div: number) => r && r !== "0x" ? Number(BigInt(r)) / div : 0;
 
-  // Sequential calls to avoid rate limit on Arc Testnet free RPC
-  const usdcRaw   = await rpcFetch("eth_call", [{to:"0x3600000000000000000000000000000000000000", data:"0x70a08231"+pad}, "latest"]);
-  const eurcRaw   = await rpcFetch("eth_call", [{to:"0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a", data:"0x70a08231"+pad}, "latest"]);
-  const cirbtcRaw = await rpcFetch("eth_call", [{to:"0xf0C4a4CE82A5746AbAAd9425360Ab04fbBA432BF", data:"0x70a08231"+pad}, "latest"]);
-  const nativeRaw = await rpcFetch("eth_getBalance", [addr, "latest"]);
+  // All 4 calls in parallel — fast and works fine with Arc RPC
+  const [usdcRaw, eurcRaw, cirbtcRaw, nativeRaw] = await Promise.all([
+    rpcFetch("eth_call", [{to:"0x3600000000000000000000000000000000000000", data:"0x70a08231"+pad}, "latest"]),
+    rpcFetch("eth_call", [{to:"0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a", data:"0x70a08231"+pad}, "latest"]),
+    rpcFetch("eth_call", [{to:"0xf0C4a4CE82A5746AbAAd9425360Ab04fbBA432BF", data:"0x70a08231"+pad}, "latest"]),
+    rpcFetch("eth_getBalance", [addr, "latest"]),
+  ]);
 
   return {
     USDC:   parse(usdcRaw,   1e6),
@@ -69,17 +71,38 @@ async function fetchBal(addr: string): Promise<WalletBalances> {
 }
 
 export function WalletProvider({ children }: { children: ReactNode }) {
-  const [wallet, setWallet]     = useState<WalletState>(DEFAULT);
-  const [modalOpen, setModal]   = useState(false);
+  const [wallet, setWallet]       = useState<WalletState>(DEFAULT);
+  const [modalOpen, setModal]     = useState(false);
+  const [balanceFailed, setFailed] = useState(false);
+  const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const loadBal = useCallback(async (addr: string) => {
-    setWallet(p => ({ ...p, balancesLoading:true }));
+  // Check if all balances are zero — likely a failed fetch
+  function isFetchFailed(b: WalletBalances) {
+    return b.USDC === 0 && b.EURC === 0 && b.cirBTC === 0 && b.ARC === 0;
+  }
+
+  const loadBal = useCallback(async (addr: string, attempt = 0) => {
+    setWallet(p => ({ ...p, balancesLoading: true }));
+    setFailed(false);
     const balances = await fetchBal(addr);
-    setWallet(p => ({ ...p, balancesLoading:false, balances }));
+    setWallet(p => ({ ...p, balancesLoading: false, balances }));
+
+    // If all zeros and wallet should have balance → auto-retry up to 2 times
+    if (isFetchFailed(balances) && attempt < 2) {
+      const delay = (attempt + 1) * 2000; // 2s then 4s
+      retryRef.current = setTimeout(() => loadBal(addr, attempt + 1), delay);
+    } else if (isFetchFailed(balances)) {
+      setFailed(true); // show retry button after all attempts fail
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => { if (retryRef.current) clearTimeout(retryRef.current); };
   }, []);
 
   const refreshBalances = useCallback(async () => {
-    if (wallet.address) await loadBal(wallet.address);
+    if (retryRef.current) clearTimeout(retryRef.current);
+    if (wallet.address) await loadBal(wallet.address, 0);
   }, [wallet.address, loadBal]);
 
   useEffect(() => {
@@ -115,6 +138,6 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     setWallet(p=>({ ...p, balances:{ ...p.balances, [sym]:Math.max(0,parseFloat(((p.balances as unknown as Record<string,number>)[sym]+delta).toFixed(8))) } }));
   },[]);
 
-  return <Ctx.Provider value={{ wallet, connect, disconnect, refreshBalances, updateBalance, modalOpen, openModal:()=>setModal(true), closeModal:()=>setModal(false) }}>{children}</Ctx.Provider>;
+  return <Ctx.Provider value={{ wallet, connect, disconnect, refreshBalances, updateBalance, modalOpen, openModal:()=>setModal(true), closeModal:()=>setModal(false), balanceFailed }}>{children}</Ctx.Provider>;
 }
 export function useWallet() { return useContext(Ctx); }

@@ -2,6 +2,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { useWallet } from "@/components/WalletProvider";
 import { ARC_RPC, ARC_EXPLORER, CONTRACTS, TOKEN_META } from "@/lib/contracts";
+import { fetchPythPrices } from "@/lib/pyth";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const ROUTER  = "0x29E0C2A0780196792dECc9183Dd5aA540c955BDf";
@@ -84,6 +85,30 @@ export default function PortfolioPage() {
   const [loading,  setLoading]  = useState(false);
   const [lastRefresh, setLastRefresh] = useState<Date|null>(null);
 
+  const [pythPrices, setPythPrices] = useState<{ BTC: number; EUR: number }>({ BTC: 0, EUR: 1.082 });
+
+  // Fetch Pyth prices on mount and every 30s
+  useEffect(() => {
+    async function loadPyth() {
+      const p = await fetchPythPrices();
+      setPythPrices({
+        BTC: p.BTC_USD?.price ?? 0,
+        EUR: p.EUR_USD?.price ?? 1.082,
+      });
+    }
+    loadPyth();
+    const id = setInterval(loadPyth, 30000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Compute live price for each token using Pyth
+  function getLivePrice(sym: string): number {
+    if (sym === "USDC")   return 1;
+    if (sym === "EURC")   return pythPrices.EUR;
+    if (sym === "cirBTC") return pythPrices.BTC;
+    return 0;
+  }
+
   const totalTokenUSD = tokens.reduce((s,t)=>s+t.valueUSD,0);
   const totalLpUSD    = lpPos.reduce((s,p)=>s+p.valueUSD,0);
   const totalUSD      = totalTokenUSD + totalLpUSD;
@@ -97,7 +122,8 @@ export default function PortfolioPage() {
       for (const t of TOKENS) {
         const raw = await rpc("eth_call", [{ to:t.addr, data:encodeBalOf(wallet.address) }, "latest"]);
         const balance = raw && raw !== "0x" ? Number(BigInt(raw)) / 10**t.decimals : 0;
-        tokenData.push({ ...t, balance, valueUSD: balance * t.price });
+        const livePrice = getLivePrice(t.sym);
+        tokenData.push({ ...t, price: livePrice, balance, valueUSD: balance * livePrice });
       }
       setTokens(tokenData);
 
@@ -201,7 +227,7 @@ export default function PortfolioPage() {
                       {t.balance.toLocaleString(undefined, { maximumFractionDigits:t.decimals===8?8:4 })}
                     </div>
                     <div style={{ fontSize:12, color:"var(--text2)", fontFamily:"var(--mono)" }}>
-                      {t.price > 0 ? `$${t.valueUSD.toLocaleString(undefined,{maximumFractionDigits:2})}` : "no price feed"}
+                      {t.price > 0 ? `$${t.valueUSD.toLocaleString(undefined,{maximumFractionDigits:2})}` : "—"}
                     </div>
                   </div>
                 </div>
@@ -273,16 +299,23 @@ export default function PortfolioPage() {
 
           {/* Price reference */}
           <div style={{ marginTop:20, padding:"12px 16px", background:"var(--bg1)", border:"1px solid var(--border)", borderRadius:12 }}>
-            <div style={{ fontSize:11, color:"var(--text2)", fontFamily:"var(--mono)", marginBottom:6, textTransform:"uppercase", letterSpacing:"0.5px" }}>Price Reference (USD)</div>
-            <div style={{ display:"flex", gap:20, flexWrap:"wrap" }}>
-              {TOKENS.map(t=>(
-                <span key={t.sym} style={{ fontSize:12, fontFamily:"var(--mono)", color:"var(--text2)" }}>
-                  {t.sym}: <strong style={{ color:"var(--text1)" }}>{t.price > 0 ? `$${t.price.toLocaleString()}` : "N/A"}</strong>
-                </span>
-              ))}
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:6 }}>
+              <div style={{ fontSize:11, color:"var(--text2)", fontFamily:"var(--mono)", textTransform:"uppercase", letterSpacing:"0.5px" }}>Price Reference (USD)</div>
+              <div style={{ display:"flex", alignItems:"center", gap:4 }}>
+                <div style={{ width:5, height:5, borderRadius:"50%", background:"#00e5ff", animation:"pulse 2s infinite" }}/>
+                <span style={{ fontSize:9, fontFamily:"var(--mono)", color:"var(--text2)", fontWeight:700 }}>Pyth live</span>
+              </div>
             </div>
-            <div style={{ fontSize:10, color:"var(--text2)", fontFamily:"var(--mono)", marginTop:6 }}>
-              * Prices are hardcoded references — not live feeds
+            <div style={{ display:"flex", gap:20, flexWrap:"wrap" }}>
+              <span style={{ fontSize:12, fontFamily:"var(--mono)", color:"var(--text2)" }}>
+                USDC: <strong style={{ color:"var(--text1)" }}>$1.0000</strong>
+              </span>
+              <span style={{ fontSize:12, fontFamily:"var(--mono)", color:"var(--text2)" }}>
+                EURC: <strong style={{ color:"var(--text1)" }}>{pythPrices.EUR > 0 ? `$${pythPrices.EUR.toFixed(4)}` : "—"}</strong>
+              </span>
+              <span style={{ fontSize:12, fontFamily:"var(--mono)", color:"var(--text2)" }}>
+                cirBTC: <strong style={{ color:"var(--text1)" }}>{pythPrices.BTC > 0 ? `$${pythPrices.BTC.toLocaleString("en-US",{maximumFractionDigits:2})}` : "—"}</strong>
+              </span>
             </div>
           </div>
         </>

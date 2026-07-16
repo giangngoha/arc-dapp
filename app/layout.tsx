@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import Nav from "@/components/Nav";
+import PriceTicker from "@/components/PriceTicker";
 import { WalletProvider } from "@/components/WalletProvider";
 import ToastContainer from "@/components/Toast";
 
@@ -18,6 +19,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body>
         <WalletProvider>
           <Nav />
+          <PriceTicker />
           {children}
         </WalletProvider>
         <ToastContainer />

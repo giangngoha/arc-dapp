@@ -25,7 +25,7 @@ function fmt(n:number, dec=4){ if(n===0)return "0"; if(n<0.00000001)return "<0.0
 
 export default function Nav() {
   const path = usePathname();
-  const { wallet, disconnect, openModal } = useWallet();
+  const { wallet, disconnect, openModal, refreshBalances, balanceFailed } = useWallet();
   const [gas,         setGas]       = useState(8);
   const [menuOpen,    setMenu]      = useState(false);
   const [chainOpen,   setChainOpen] = useState(false);
@@ -176,6 +176,15 @@ export default function Nav() {
                   wallet.balancesLoading ? (
                     <div style={{padding:"10px 12px",fontSize:12,color:"var(--text2)",fontFamily:"var(--mono)",display:"flex",gap:6}}>
                       <span className="spinner" style={{borderTopColor:"var(--cyan)"}}/>Loading…
+                    </div>
+                  ) : balanceFailed ? (
+                    <div style={{padding:"10px 12px"}}>
+                      <div style={{fontSize:11,color:"var(--text2)",fontFamily:"var(--mono)",marginBottom:6}}>Failed to load balances</div>
+                      <button
+                        onClick={()=>refreshBalances()}
+                        style={{fontSize:11,fontFamily:"var(--mono)",fontWeight:700,color:"var(--cyan)",background:"var(--bg3)",border:"1px solid var(--border)",borderRadius:6,padding:"4px 10px",cursor:"pointer"}}>
+                        ↺ Retry
+                      </button>
                     </div>
                   ) : (
                     [["USDC",4],["EURC",4],["cirBTC",8]].map(([sym,dec])=>(
