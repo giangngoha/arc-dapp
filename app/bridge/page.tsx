@@ -4,10 +4,10 @@ import { useWallet } from "@/components/WalletProvider";
 import { showToast } from "@/components/Toast";
 import { toUnits, encodeApprove, encodeAllowance } from "@/lib/contracts";
 
-// ─── Contract addresses from Circle official docs ────────────────────────────
+// ─── Chain definitions ────────────────────────────────────────────────────────
 const CHAINS = [
   {
-    id: "Arc_Testnet", label: "Arc Testnet", sub: "Arc (0x4cef52)", color: "#00b4d8", icon: "A",
+    id: "Arc_Testnet", label: "Arc Testnet", sub: "Arc (0x4cef52)", color: "#00b4d8", icon: "arc",
     chainIdHex: "0x4cef52",
     usdc:        "0x3600000000000000000000000000000000000000",
     messenger:   "0x8fe6b999dc680ccfdd5bf7eb0974218be2542daa",
@@ -43,18 +43,17 @@ const CHAINS = [
 type Chain = typeof CHAINS[0];
 type BridgeStep = "idle" | "approving" | "burning" | "attesting" | "minting" | "done" | "error";
 
-// ─── Pending Bridge type (persisted to localStorage) ─────────────────────────
+// ─── Pending bridge entry (persisted to localStorage) ─────────────────────────
 interface PendingBridge {
-  id:           string;   // uuid
+  id:           string;
   burnTxHash:   string;
   srcChainId:   string;
   destChainId:  string;
   srcDomain:    number;
-  amount:       string;   // "1.00"
-  burnedAt:     number;   // Date.now()
+  amount:       string;
+  burnedAt:     number;
   fromExplorer: string;
   toExplorer:   string;
-  // filled in after attestation
   status: "attesting" | "ready" | "minting" | "completed" | "failed";
   message?:     string;
   attestation?: string;
@@ -72,15 +71,25 @@ function savePending(list: PendingBridge[]) {
 function uid() { return Math.random().toString(36).slice(2, 10); }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-const MAX_UINT256 = BigInt("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+// Large approval amount — avoids MAX_U256 which triggers NFT-style warning in MetaMask.
+// 1 billion USDC (6 decimals) is large enough to never need re-approving in practice.
+const LARGE_APPROVAL = BigInt(1_000_000_000) * BigInt(10 ** 6);
+
 const DEST_CALLER_BYTES32 = "0x0000000000000000000000000000000000000000000000000000000000000000";
 const MAX_FEE     = 500n;
 const MIN_FINALITY = 1000;
-// Start polling Circle API after 5 minutes (won't be ready before that on testnet)
-const POLL_DELAY_MS  = 5 * 60 * 1000;
+const POLL_DELAY_MS   = 5 * 60 * 1000;
 const POLL_INTERVAL_MS = 30 * 1000;
 
-// ─── ABI Encoders ────────────────────────────────────────────────────────────
+// ─── Safely parse an allowance RPC result as BigInt ──────────────────────────
+function safeAllowance(raw: unknown): bigint {
+  try {
+    if (!raw || raw === "0x" || raw === "0x0") return 0n;
+    return BigInt(raw as string);
+  } catch { return 0n; }
+}
+
+// ─── ABI Encoders ─────────────────────────────────────────────────────────────
 function encodeDepositForBurnV2(amount: bigint, destDomain: number, recipient: string, burnToken: string, maxFee: bigint, minFinalityThreshold: number): string {
   const recipientBytes32 = "000000000000000000000000" + recipient.toLowerCase().replace("0x", "");
   return (
@@ -112,7 +121,7 @@ function encodeReceiveMessage(message: string, attestation: string): string {
   );
 }
 
-// ─── RPC helpers ─────────────────────────────────────────────────────────────
+// ─── RPC helpers ──────────────────────────────────────────────────────────────
 async function rpcCall(url: string, method: string, params: unknown[]): Promise<unknown> {
   const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) });
   const j = await res.json();
@@ -150,7 +159,10 @@ async function waitTxRpc(rpcUrl: string, hash: string, maxWait = 120000): Promis
 }
 
 async function checkAllowance(rpcUrl: string, token: string, owner: string, spender: string): Promise<bigint> {
-  try { const r: any = await rpcCall(rpcUrl, "eth_call", [{ to: token, data: encodeAllowance(owner, spender) }, "latest"]); return r && r !== "0x" ? BigInt(r) : 0n; } catch { return 0n; }
+  try {
+    const r: any = await rpcCall(rpcUrl, "eth_call", [{ to: token, data: encodeAllowance(owner, spender) }, "latest"]);
+    return safeAllowance(r);
+  } catch { return 0n; }
 }
 
 async function pollAttestationV2(srcDomain: number, burnTxHash: string, onStatus: (s: string) => void, maxWait = 1800000): Promise<{ message: string; attestation: string } | null> {
@@ -174,7 +186,6 @@ async function pollAttestationV2(srcDomain: number, burnTxHash: string, onStatus
   return null;
 }
 
-// Check attestation once (for background tracker)
 async function checkAttestationOnce(srcDomain: number, burnTxHash: string): Promise<{ message: string; attestation: string } | null> {
   try {
     const url = `https://iris-api-sandbox.circle.com/v2/messages/${srcDomain}?transactionHash=${burnTxHash}`;
@@ -187,7 +198,6 @@ async function checkAttestationOnce(srcDomain: number, burnTxHash: string): Prom
   return null;
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
 function fmtElapsed(ms: number): string {
   const s = Math.floor(ms / 1000);
   if (s < 60) return `${s}s`;
@@ -196,18 +206,99 @@ function fmtElapsed(ms: number): string {
   return `${m}m ${rem.toString().padStart(2, "0")}s`;
 }
 
-// ─── UI components ────────────────────────────────────────────────────────────
+// Arc Network logo — uses the official Arc logo image from /public/arc-logo.png
+function ArcIcon({ size = 20 }: { size?: number }) {
+  return (
+    <img
+      src="/arc-logo.png"
+      alt="Arc Network"
+      width={size}
+      height={size}
+      style={{ objectFit: "contain", display: "block" }}
+    />
+  );
+}
+
+// ─── Chain icon renderer ───────────────────────────────────────────────────────
+function ChainIconContent({ chain, size = 36 }: { chain: Chain; size?: number }) {
+  if (chain.icon === "arc") return <ArcIcon size={Math.round(size * 0.65)} />;
+  return <span style={{ fontSize: size * 0.42, fontWeight: 800, color: "#fff" }}>{chain.icon}</span>;
+}
+
+// ─── UI components ─────────────────────────────────────────────────────────────
 function ChainCard({ chain, selected, onClick }: { chain: Chain; selected: boolean; onClick: () => void }) {
   return (
     <button type="button" onClick={onClick} style={{ flex: 1, padding: "14px 8px", borderRadius: 14, border: "1px solid", borderColor: selected ? chain.color + "99" : "var(--border)", background: selected ? chain.color + "18" : "var(--bg2)", cursor: "pointer", transition: "all 0.2s", display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
-      <div style={{ width: 36, height: 36, borderRadius: "50%", background: selected ? chain.color : "var(--bg3)", border: `2px solid ${selected ? chain.color : "var(--border)"}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, fontWeight: 800, color: "#fff", boxShadow: selected ? `0 0 12px ${chain.color}44` : "none" }}>{chain.icon}</div>
+      {/* Arc chain: show logo image directly without circle background */}
+      {chain.icon === "arc" ? (
+        <div style={{ width: 36, height: 36, display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <ArcIcon size={32} />
+        </div>
+      ) : (
+        <div style={{ width: 36, height: 36, borderRadius: "50%", background: selected ? chain.color : "var(--bg3)", border: `2px solid ${selected ? chain.color : "var(--border)"}`, display: "flex", alignItems: "center", justifyContent: "center", boxShadow: selected ? `0 0 12px ${chain.color}44` : "none" }}>
+          <ChainIconContent chain={chain} size={36} />
+        </div>
+      )}
       <span style={{ fontSize: 12, fontWeight: 700, color: selected ? "#fff" : "var(--text1)" }}>{chain.label}</span>
       <span style={{ fontSize: 10, fontFamily: "var(--mono)", color: selected ? chain.color : "var(--text2)" }}>{chain.sub}</span>
     </button>
   );
 }
 
-// ─── Pending Bridge Card ──────────────────────────────────────────────────────
+// ─── History card (shows only completed bridges) ───────────────────────────────
+function HistoryCard({
+  bridge, onDismiss,
+}: {
+  bridge: PendingBridge;
+  onDismiss: (id: string) => void;
+}) {
+  const src  = CHAINS.find(c => c.id === bridge.srcChainId)!;
+  const dest = CHAINS.find(c => c.id === bridge.destChainId)!;
+
+  return (
+    <div className="fade-in" style={{ background: "transparent", border: "1px solid rgba(0,200,150,0.18)", borderRadius: 10, padding: "8px 12px" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          {/* Chain icons — Arc shows logo directly, others use colored circle */}
+          <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
+            {src?.icon === "arc"
+              ? <ArcIcon size={18} />
+              : <div style={{ width: 18, height: 18, borderRadius: "50%", background: src?.color ?? "#888", display: "flex", alignItems: "center", justifyContent: "center" }}><ChainIconContent chain={src} size={18} /></div>
+            }
+            <span style={{ fontSize: 10, color: "var(--text2)" }}>→</span>
+            {dest?.icon === "arc"
+              ? <ArcIcon size={18} />
+              : <div style={{ width: 18, height: 18, borderRadius: "50%", background: dest?.color ?? "#888", display: "flex", alignItems: "center", justifyContent: "center" }}><ChainIconContent chain={dest} size={18} /></div>
+            }
+          </div>
+          <span style={{ fontSize: 12, fontWeight: 700, fontFamily: "var(--mono)" }}>{bridge.amount} USDC</span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ fontSize: 9, padding: "1px 6px", borderRadius: 20, background: "rgba(0,200,150,0.12)", color: "var(--green)", fontFamily: "var(--mono)", fontWeight: 700 }}>✓ Done</span>
+          <button onClick={() => onDismiss(bridge.id)} style={{ background: "none", border: "none", color: "var(--text2)", cursor: "pointer", fontSize: 14, lineHeight: 1, padding: 0 }}>×</button>
+        </div>
+      </div>
+
+      {/* TX links */}
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, fontFamily: "var(--mono)", color: "var(--text2)", marginBottom: bridge.mintTxHash ? 3 : 0 }}>
+        <span>Burn TX ({src?.label})</span>
+        <a href={`${bridge.fromExplorer}/tx/${bridge.burnTxHash}`} target="_blank" rel="noopener noreferrer" style={{ color: "var(--cyan)", textDecoration: "none" }}>
+          {bridge.burnTxHash.slice(0, 8)}…{bridge.burnTxHash.slice(-6)} ↗
+        </a>
+      </div>
+      {bridge.mintTxHash && (
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, fontFamily: "var(--mono)", color: "var(--text2)" }}>
+          <span>Mint TX ({dest?.label})</span>
+          <a href={`${bridge.toExplorer}/tx/${bridge.mintTxHash}`} target="_blank" rel="noopener noreferrer" style={{ color: "var(--green)", textDecoration: "none" }}>
+            {bridge.mintTxHash.slice(0, 8)}…{bridge.mintTxHash.slice(-6)} ↗
+          </a>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Pending bridge card (for active/attesting/ready/minting) ─────────────────
 function PendingBridgeCard({
   bridge, now, onMint, onDismiss,
 }: {
@@ -223,46 +314,41 @@ function PendingBridgeCard({
 
   const isReady    = bridge.status === "ready";
   const isMinting  = bridge.status === "minting";
-  const isDone     = bridge.status === "completed";
   const isFailed   = bridge.status === "failed";
   const isAttesting = bridge.status === "attesting";
 
-  const borderColor = isDone ? "rgba(0,200,150,0.3)" : isReady ? "rgba(0,229,255,0.4)" : isFailed ? "rgba(224,65,90,0.3)" : "var(--border)";
-  const bgColor     = isDone ? "rgba(0,200,150,0.04)" : isReady ? "rgba(0,229,255,0.06)" : "var(--bg1)";
+  const borderColor = isReady ? "rgba(0,229,255,0.4)" : isFailed ? "rgba(224,65,90,0.3)" : "var(--border)";
+  const bgColor     = isReady ? "rgba(0,229,255,0.06)" : "var(--bg1)";
 
   return (
     <div className="fade-in" style={{ background: bgColor, border: `1px solid ${borderColor}`, borderRadius: 14, padding: "14px 16px" }}>
-      {/* Header row */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          {/* Chain icons */}
           <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-            <div style={{ width: 22, height: 22, borderRadius: "50%", background: src?.color ?? "#888", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 800, color: "#fff" }}>{src?.icon}</div>
+            <div style={{ width: 22, height: 22, borderRadius: "50%", background: src?.color ?? "#888", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <ChainIconContent chain={src} size={22} />
+            </div>
             <span style={{ fontSize: 11, color: "var(--text2)" }}>→</span>
-            <div style={{ width: 22, height: 22, borderRadius: "50%", background: dest?.color ?? "#888", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 800, color: "#fff" }}>{dest?.icon}</div>
+            <div style={{ width: 22, height: 22, borderRadius: "50%", background: dest?.color ?? "#888", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <ChainIconContent chain={dest} size={22} />
+            </div>
           </div>
           <span style={{ fontSize: 13, fontWeight: 700, fontFamily: "var(--mono)" }}>{bridge.amount} USDC</span>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          {/* Status badge */}
-          {isDone && <span style={{ fontSize: 10, padding: "2px 8px", borderRadius: 20, background: "rgba(0,200,150,0.15)", color: "var(--green)", fontFamily: "var(--mono)", fontWeight: 700 }}>✓ Done</span>}
           {isReady && <span style={{ fontSize: 10, padding: "2px 8px", borderRadius: 20, background: "rgba(0,229,255,0.15)", color: "var(--cyan)", fontFamily: "var(--mono)", fontWeight: 700 }}>Ready to Mint</span>}
           {isMinting && <span style={{ fontSize: 10, padding: "2px 8px", borderRadius: 20, background: "rgba(0,229,255,0.1)", color: "var(--cyan)", fontFamily: "var(--mono)", fontWeight: 700 }}>Minting…</span>}
           {isFailed && <span style={{ fontSize: 10, padding: "2px 8px", borderRadius: 20, background: "rgba(224,65,90,0.12)", color: "var(--red)", fontFamily: "var(--mono)", fontWeight: 700 }}>Failed</span>}
           {isAttesting && <span style={{ fontSize: 10, padding: "2px 8px", borderRadius: 20, background: "var(--bg3)", color: "var(--text2)", fontFamily: "var(--mono)", fontWeight: 700 }}>Attesting</span>}
-          {/* Dismiss button for completed/failed */}
-          {(isDone || isFailed) && (
+          {isFailed && (
             <button onClick={() => onDismiss(bridge.id)} style={{ background: "none", border: "none", color: "var(--text2)", cursor: "pointer", fontSize: 16, lineHeight: 1, padding: 0 }}>×</button>
           )}
         </div>
       </div>
 
-      {/* Timer + info row */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: isReady || isMinting ? 10 : 0 }}>
         <div style={{ fontFamily: "var(--mono)", fontSize: 12 }}>
-          {isDone ? (
-            <span style={{ color: "var(--green)" }}>Completed in {fmtElapsed(elapsed)}</span>
-          ) : isFailed ? (
+          {isFailed ? (
             <span style={{ color: "var(--red)" }}>Failed after {fmtElapsed(elapsed)}</span>
           ) : (
             <span style={{ color: "var(--text2)" }}>
@@ -282,7 +368,6 @@ function PendingBridgeCard({
         </a>
       </div>
 
-      {/* Mint Now button */}
       {isReady && (
         <button onClick={() => onMint(bridge)}
           className="swap-btn ready"
@@ -296,20 +381,13 @@ function PendingBridgeCard({
           <span className="spinner" style={{ borderTopColor: "var(--cyan)" }} />Minting USDC on {dest?.label}…
         </div>
       )}
-
-      {isDone && bridge.mintTxHash && (
-        <a href={`${bridge.toExplorer}/tx/${bridge.mintTxHash}`} target="_blank" rel="noopener noreferrer"
-          style={{ fontSize: 12, color: "var(--green)", fontFamily: "var(--mono)", textDecoration: "none", display: "block", marginTop: 6 }}>
-          Mint TX: {bridge.mintTxHash.slice(0, 8)}…{bridge.mintTxHash.slice(-6)} ↗
-        </a>
-      )}
     </div>
   );
 }
 
 const STEP_ORDER: BridgeStep[] = ["approving", "burning", "attesting", "minting", "done"];
 
-// ─── Main page ────────────────────────────────────────────────────────────────
+// ─── Main page ─────────────────────────────────────────────────────────────────
 export default function BridgePage() {
   const { wallet, openModal } = useWallet();
   const [fromId,   setFromId]  = useState("Arc_Testnet");
@@ -326,26 +404,20 @@ export default function BridgePage() {
   const [now,      setNow]     = useState(Date.now());
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Load from localStorage on mount
-  useEffect(() => {
-    setPending(loadPending());
-  }, []);
+  useEffect(() => { setPending(loadPending()); }, []);
 
-  // Tick every second for the elapsed timer
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
   }, []);
 
-  // Background polling: check Circle API for each attesting bridge
-  // Only starts polling after POLL_DELAY_MS (5 min) since burn
   const checkPending = useCallback(async () => {
     const list = loadPending();
     let changed = false;
     const updated = await Promise.all(list.map(async (b) => {
       if (b.status !== "attesting") return b;
       const elapsed = Date.now() - b.burnedAt;
-      if (elapsed < POLL_DELAY_MS) return b; // too early
+      if (elapsed < POLL_DELAY_MS) return b;
       const result = await checkAttestationOnce(b.srcDomain, b.burnTxHash);
       if (result) {
         changed = true;
@@ -360,7 +432,6 @@ export default function BridgePage() {
     }
   }, []);
 
-  // Start/stop polling interval
   useEffect(() => {
     if (pollRef.current) clearInterval(pollRef.current);
     const hasAttesting = pending.some(b => b.status === "attesting");
@@ -369,24 +440,12 @@ export default function BridgePage() {
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [pending, checkPending]);
 
-  function updatePending(list: PendingBridge[]) {
-    savePending(list);
-    setPending(list);
-  }
-
-  function addPending(b: PendingBridge) {
-    const list = [...loadPending(), b];
-    updatePending(list);
-  }
-
+  function updatePending(list: PendingBridge[]) { savePending(list); setPending(list); }
+  function addPending(b: PendingBridge) { updatePending([...loadPending(), b]); }
   function mutatePending(id: string, patch: Partial<PendingBridge>) {
-    const list = loadPending().map(b => b.id === id ? { ...b, ...patch } : b);
-    updatePending(list);
+    updatePending(loadPending().map(b => b.id === id ? { ...b, ...patch } : b));
   }
-
-  function dismissPending(id: string) {
-    updatePending(loadPending().filter(b => b.id !== id));
-  }
+  function dismissPending(id: string) { updatePending(loadPending().filter(b => b.id !== id)); }
 
   // ── Mint handler (from tracker) ────────────────────────────────────────────
   async function handleMint(bridge: PendingBridge) {
@@ -406,7 +465,7 @@ export default function BridgePage() {
     } catch (err: any) {
       const msg = err?.message || String(err);
       if (msg.includes("4001") || /reject|denied|cancel/i.test(msg)) {
-        mutatePending(bridge.id, { status: "ready" }); // revert to ready so user can retry
+        mutatePending(bridge.id, { status: "ready" });
         showToast(false, "Cancelled", "Rejected in wallet.");
       } else {
         mutatePending(bridge.id, { status: "failed" });
@@ -441,7 +500,7 @@ export default function BridgePage() {
     const eth = (window as any).ethereum;
 
     try {
-      // ── 1. Approve ────────────────────────────────────────────────────────
+      // ── 1. Approve (only if allowance insufficient) ────────────────────────
       setStep("approving");
       setStat(`Switching to ${from.label}…`);
       await switchToChain(from);
@@ -451,8 +510,9 @@ export default function BridgePage() {
       setStat("Checking USDC allowance…");
       const allowance = await checkAllowance(from.rpc, from.usdc, wallet.address, from.messenger);
       if (allowance < amtRaw) {
+        // Approve a large amount (not MAX_U256 — avoids MetaMask NFT withdrawal warning)
         setStat(`Approving USDC on ${from.label} — confirm in wallet…`);
-        const approveTx: string = await eth.request({ method: "eth_sendTransaction", params: [{ from: wallet.address, to: from.usdc, data: encodeApprove(from.messenger, MAX_UINT256), gas: "0x186A0" }] });
+        const approveTx: string = await eth.request({ method: "eth_sendTransaction", params: [{ from: wallet.address, to: from.usdc, data: encodeApprove(from.messenger, LARGE_APPROVAL), gas: "0x186A0" }] });
         setStat("Waiting for approval confirmation…");
         if (!await waitTxRpc(from.rpc, approveTx)) throw new Error("Approve transaction failed on-chain.");
       } else {
@@ -460,7 +520,7 @@ export default function BridgePage() {
         await new Promise(r => setTimeout(r, 500));
       }
 
-      // ── 2. depositForBurn ─────────────────────────────────────────────────
+      // ── 2. depositForBurn ──────────────────────────────────────────────────
       setStep("burning");
       const burnData = encodeDepositForBurnV2(amtRaw, to.domain, wallet.address, from.usdc, MAX_FEE, MIN_FINALITY);
 
@@ -479,7 +539,7 @@ export default function BridgePage() {
       setTxLinks({ burnTx, fromExplorer: from.explorer, toExplorer: to.explorer, toLabel: to.label });
       showToast(true, "Burn Confirmed ✓", "Tracking attestation in background…");
 
-      // ── Save to pending tracker ───────────────────────────────────────────
+      // ── Save to pending tracker ────────────────────────────────────────────
       const pendingEntry: PendingBridge = {
         id: uid(), burnTxHash: burnTx, srcChainId: from.id, destChainId: to.id,
         srcDomain: from.domain, amount: amtN.toFixed(2), burnedAt: Date.now(),
@@ -487,23 +547,21 @@ export default function BridgePage() {
       };
       addPending(pendingEntry);
 
-      // ── 3. Poll attestation (in-session, full wait) ───────────────────────
+      // ── 3. Poll attestation ────────────────────────────────────────────────
       setStep("attesting");
       setStat("Waiting for Circle attestation — this usually takes 5–20 minutes on testnet…");
       const attestResult = await pollAttestationV2(from.domain, burnTx, setStat);
       if (!attestResult) {
-        // Timed out — but saved to tracker, user can mint later
-        mutatePending(pendingEntry.id, { status: "attesting" }); // keep as attesting for tracker
+        mutatePending(pendingEntry.id, { status: "attesting" });
         showToast(false, "Attestation Timeout", "Bridge saved — check Status Tracker below to mint later.");
         setStep("error");
         setErrorMsg("Circle attestation timed out. Your burn is confirmed — use the Bridge Status Tracker below to complete the mint when ready.");
         return;
       }
 
-      // Update pending to ready (will be used if mint fails and user retries)
       mutatePending(pendingEntry.id, { status: "ready", message: attestResult.message, attestation: attestResult.attestation });
 
-      // ── 4. receiveMessage ─────────────────────────────────────────────────
+      // ── 4. receiveMessage ──────────────────────────────────────────────────
       setStep("minting");
       setStat(`Switching to ${to.label}…`);
       await switchToChain(to);
@@ -536,14 +594,21 @@ export default function BridgePage() {
 
   const stepDone   = (s: BridgeStep) => STEP_ORDER.indexOf(step) > STEP_ORDER.indexOf(s) || step === "done";
   const stepActive = (s: BridgeStep) => step === s;
-  const activePending = pending.filter(b => b.status !== "completed" || Date.now() - b.burnedAt < 3600000);
+
+  // Separate active (attesting/ready/minting/failed) from completed
+  const completedPending = pending.filter(b => b.status === "completed");
 
   return (
-    <div className="fade-in" style={{ maxWidth: 520, margin: "0 auto", padding: "20px 24px" }}>
-      <div style={{ marginBottom: 22 }}>
+    <div className="fade-in" style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: "20px 24px", paddingLeft: 180 }}>
+      <div style={{ marginBottom: 22, width: "100%", maxWidth: 904 }}>
         <h1 style={{ fontSize: 26, fontWeight: 800, letterSpacing: -0.5, marginBottom: 4 }}>Bridge</h1>
         <p style={{ fontSize: 13, color: "var(--text2)" }}>Cross-chain USDC · Circle CCTP V2 · Auto Attest &amp; Mint</p>
       </div>
+
+      {/* Two-column layout: bridge form left, history right */}
+      <div style={{ display: "flex", gap: 24, alignItems: "flex-start", width: "100%", maxWidth: 904 }}>
+      {/* ── LEFT: bridge form ───────────────────────────────────────────────── */}
+      <div style={{ flex: "0 0 520px", minWidth: 0 }}>
 
       <div style={{ background: "var(--bg1)", border: "1px solid var(--border)", borderRadius: 20, padding: 22 }}>
         {/* FROM */}
@@ -697,32 +762,37 @@ export default function BridgePage() {
         </div>
       )}
 
-      {/* ── Bridge Status Tracker ──────────────────────────────────────────── */}
-      {activePending.length > 0 && (
-        <div className="fade-in" style={{ marginTop: 20 }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-            <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text2)", textTransform: "uppercase", letterSpacing: "0.6px", fontFamily: "var(--mono)" }}>
-              Bridge Status Tracker
-            </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              {/* live indicator dot */}
-              <div style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--cyan)", animation: "pulse 2s infinite" }} />
-              <span style={{ fontSize: 10, color: "var(--text2)", fontFamily: "var(--mono)" }}>live</span>
-            </div>
+      </div>{/* end left col */}
+
+      {/* ── RIGHT: History panel — compact, fixed width, single scroll ──── */}
+      <div style={{ flex: "0 0 360px", position: "sticky", top: 20 }}>
+        <div style={{ background: "var(--bg1)", border: "1px solid var(--border)", borderRadius: 16, padding: "14px 14px 12px" }}>
+          {/* Header */}
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+            <span style={{ fontSize: 12, fontWeight: 700, color: "var(--text1)", letterSpacing: "0.2px" }}>History</span>
+            {completedPending.length > 0 && (
+              <span style={{ fontSize: 9, background: "rgba(0,200,150,0.12)", color: "var(--green)", borderRadius: 20, padding: "2px 7px", fontFamily: "var(--mono)", fontWeight: 700 }}>
+                {completedPending.length} completed
+              </span>
+            )}
           </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {activePending.map(b => (
-              <PendingBridgeCard
-                key={b.id}
-                bridge={b}
-                now={now}
-                onMint={handleMint}
-                onDismiss={dismissPending}
-              />
-            ))}
-          </div>
+
+          {completedPending.length === 0 ? (
+            <div style={{ textAlign: "center", padding: "24px 0", color: "var(--text2)", fontSize: 11, fontFamily: "var(--mono)" }}>
+              <div style={{ fontSize: 20, marginBottom: 6, opacity: 0.25 }}>⇄</div>
+              No completed bridges yet
+            </div>
+          ) : (
+            /* Single scrollable area — shows 5 cards (≈80px each = 400px), scroll for more */
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 400, overflowY: "auto", paddingRight: 2 }}>
+              {completedPending.slice().reverse().map(b => (
+                <HistoryCard key={b.id} bridge={b} onDismiss={dismissPending} />
+              ))}
+            </div>
+          )}
         </div>
-      )}
+      </div>
+      </div>{/* end two-col */}
     </div>
   );
 }

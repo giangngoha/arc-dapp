@@ -27,7 +27,13 @@ function encodeGetPair(tA: string, tB: string): string {
   return "0xe6a43905" + tA.toLowerCase().replace("0x","").padStart(64,"0") + tB.toLowerCase().replace("0x","").padStart(64,"0");
 }
 
-const MAX_U256 = BigInt("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+// Use a large but not MAX_U256 value to avoid MetaMask showing NFT withdrawal warning.
+// MAX_U256 triggers NFT-style approval UI in some wallets.
+// We use a practical "unlimited" that is clearly a token amount (1 trillion units at 6 decimals = 1e18 raw).
+function makeLargeApproval(decimals: number): bigint {
+  // 1 billion tokens * 10^decimals — enough to never re-approve in practice
+  return BigInt(1_000_000_000) * BigInt(10 ** decimals);
+}
 
 // ─── ABI Encoders ─────────────────────────────────────────────────────────────
 function pad32(val: string | bigint, isAddr = false) {
@@ -109,6 +115,14 @@ async function waitTx(hash:string,maxMs=90000):Promise<boolean> {
   const start=Date.now();
   while(Date.now()-start<maxMs){await new Promise(r=>setTimeout(r,3000));try{const r:any=await rpc("eth_getTransactionReceipt",[hash]);if(r?.blockNumber)return r.status==="0x1"||r.status===1;}catch{}}
   return false;
+}
+
+// Safely parse an eth_call result as BigInt (returns 0n if null/empty/error)
+function safeAllowance(raw: unknown): bigint {
+  try {
+    if (!raw || raw === "0x" || raw === "0x0") return 0n;
+    return BigInt(raw as string);
+  } catch { return 0n; }
 }
 
 // ─── Sub-components ──────────────────────────────────────────────────────────
@@ -225,22 +239,27 @@ function PoolDetail({pool,wallet,openModal,refreshBalances,onBack}:{pool:PoolDef
       const minA=toUnits(amtA*(1-slip/100),tA.decimals),minB=toUnits(amtB*(1-slip/100),tB.decimals);
       const deadline=BigInt(Math.floor(Date.now()/1000)+1200);
 
-      // Approve A
+      // Approve A — only if current allowance is insufficient
       setStat(`Checking ${pool.tokenA} allowance…`);
-      const allA:any=await rpc("eth_call",[{to:tA.addr,data:encodeAllowance(wallet.address,ROUTER)},"latest"]);
-      if(!allA||BigInt(allA)<rawA){
+      const allARaw = await rpc("eth_call",[{to:tA.addr,data:encodeAllowance(wallet.address,ROUTER)},"latest"]);
+      const currentAllA = safeAllowance(allARaw);
+      if(currentAllA < rawA){
+        // Approve a large practical amount (avoids MAX_U256 which triggers NFT warning in wallets)
+        const approveAmtA = makeLargeApproval(tA.decimals);
         setStat(`Approve ${pool.tokenA}…`);
-        const tx:string=await eth.request({method:"eth_sendTransaction",params:[{from:wallet.address,to:tA.addr,data:encodeApprove(ROUTER,MAX_U256),gas:"0x186A0"}]});
-        setStat("Waiting…");if(!await waitTx(tx))throw new Error("Approve A failed");
+        const tx:string=await eth.request({method:"eth_sendTransaction",params:[{from:wallet.address,to:tA.addr,data:encodeApprove(ROUTER,approveAmtA),gas:"0x186A0"}]});
+        setStat("Waiting for approve…");if(!await waitTx(tx))throw new Error("Approve A failed");
         await new Promise(r=>setTimeout(r,2000));
       }
-      // Approve B
+      // Approve B — only if current allowance is insufficient
       setStat(`Checking ${pool.tokenB} allowance…`);
-      const allB:any=await rpc("eth_call",[{to:tB.addr,data:encodeAllowance(wallet.address,ROUTER)},"latest"]);
-      if(!allB||BigInt(allB)<rawB){
+      const allBRaw = await rpc("eth_call",[{to:tB.addr,data:encodeAllowance(wallet.address,ROUTER)},"latest"]);
+      const currentAllB = safeAllowance(allBRaw);
+      if(currentAllB < rawB){
+        const approveAmtB = makeLargeApproval(tB.decimals);
         setStat(`Approve ${pool.tokenB}…`);
-        const tx:string=await eth.request({method:"eth_sendTransaction",params:[{from:wallet.address,to:tB.addr,data:encodeApprove(ROUTER,MAX_U256),gas:"0x186A0"}]});
-        setStat("Waiting…");if(!await waitTx(tx))throw new Error("Approve B failed");
+        const tx:string=await eth.request({method:"eth_sendTransaction",params:[{from:wallet.address,to:tB.addr,data:encodeApprove(ROUTER,approveAmtB),gas:"0x186A0"}]});
+        setStat("Waiting for approve…");if(!await waitTx(tx))throw new Error("Approve B failed");
         await new Promise(r=>setTimeout(r,2000));
       }
       // addLiquidity
@@ -270,11 +289,15 @@ function PoolDetail({pool,wallet,openModal,refreshBalances,onBack}:{pool:PoolDef
       const minA=toUnits(info.userA*(pct/100)*(1-slip/100),tA.decimals);
       const minB=toUnits(info.userB*(pct/100)*(1-slip/100),tB.decimals);
       const deadline=BigInt(Math.floor(Date.now()/1000)+1200);
-      // Approve LP
-      setStat("Approving LP token…");
-      const allLP:any=await rpc("eth_call",[{to:pool.pair,data:encodeAllowance(wallet.address,ROUTER)},"latest"]);
-      if(!allLP||BigInt(allLP)<lpRaw){
-        const tx:string=await eth.request({method:"eth_sendTransaction",params:[{from:wallet.address,to:pool.pair,data:encodeApprove(ROUTER,MAX_U256),gas:"0x186A0"}]});
+      // Approve LP token — only if current allowance is insufficient
+      setStat("Checking LP allowance…");
+      const allLPRaw = await rpc("eth_call",[{to:pool.pair,data:encodeAllowance(wallet.address,ROUTER)},"latest"]);
+      const currentAllLP = safeAllowance(allLPRaw);
+      if(currentAllLP < lpRaw){
+        // LP tokens use 18 decimals; approve a large practical amount
+        const approveLP = makeLargeApproval(18);
+        setStat("Approving LP token…");
+        const tx:string=await eth.request({method:"eth_sendTransaction",params:[{from:wallet.address,to:pool.pair,data:encodeApprove(ROUTER,approveLP),gas:"0x186A0"}]});
         setStat("Waiting LP approve…");if(!await waitTx(tx))throw new Error("LP approve failed");
         await new Promise(r=>setTimeout(r,2000));
       }

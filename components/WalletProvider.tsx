@@ -27,47 +27,59 @@ export function getBal(b: WalletBalances, sym: string): number {
 
 const ARC_RPC_URL = "https://rpc.testnet.arc.network";
 
-async function rpcFetch(method: string, params: unknown[]): Promise<string|null> {
-  for (let i = 0; i < 2; i++) {
-    try {
-      const res = await fetch(ARC_RPC_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ jsonrpc:"2.0", id:1, method, params }),
-        signal: AbortSignal.timeout(4000),
-      });
-      const j = await res.json();
-      if (!j.error) return j.result ?? null;
-      const msg: string = j.error.message ?? "";
-      if (/rate|limit|too many/i.test(msg) && i === 0) {
-        await new Promise(r => setTimeout(r, 500));
-        continue;
-      }
-      return null;
-    } catch { return null; }
+// Fetch a single RPC call with retry logic.
+// Timeout raised to 12s — Arc Testnet can be slow.
+// Retries up to 3 times with exponential backoff on timeout or rate-limit errors.
+async function rpcFetch(method: string, params: unknown[], attempt = 0): Promise<string|null> {
+  try {
+    const res = await fetch(ARC_RPC_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc:"2.0", id:Date.now(), method, params }),
+      signal: AbortSignal.timeout(12000),
+    });
+    const j = await res.json();
+    if (!j.error) return j.result ?? null;
+    const msg: string = j.error.message ?? "";
+    // Rate limit — wait longer and retry
+    if (/rate|limit|too many/i.test(msg) && attempt < 3) {
+      await new Promise(r => setTimeout(r, 800 * (attempt + 1)));
+      return rpcFetch(method, params, attempt + 1);
+    }
+    return null;
+  } catch (e: any) {
+    // Timeout or network error — retry with backoff
+    if (attempt < 3) {
+      await new Promise(r => setTimeout(r, 600 * (attempt + 1)));
+      return rpcFetch(method, params, attempt + 1);
+    }
+    return null;
   }
-  return null;
+}
+
+// Fetch one token balance with its own retry — so a single token failure doesn't zero out all balances.
+async function fetchTokenBal(tokenAddr: string, walletAddr: string, divisor: number): Promise<number> {
+  const pad = walletAddr.toLowerCase().replace("0x","").padStart(64,"0");
+  const raw = await rpcFetch("eth_call", [{to: tokenAddr, data:"0x70a08231"+pad}, "latest"]);
+  if (!raw || raw === "0x" || raw === "0x0000000000000000000000000000000000000000000000000000000000000000") return 0;
+  try { return Number(BigInt(raw)) / divisor; } catch { return 0; }
 }
 
 async function fetchBal(addr: string): Promise<WalletBalances> {
-  const pad = addr.toLowerCase().replace("0x","").padStart(64,"0");
-  const parse = (r: string|null, div: number) => r && r !== "0x" ? Number(BigInt(r)) / div : 0;
+  // Sequential with small delays between calls to avoid rate limiting on Arc Testnet RPC.
+  // Slightly slower than Promise.all but far more reliable on public testnet endpoints.
+  const USDC   = await fetchTokenBal("0x3600000000000000000000000000000000000000", addr, 1e6);
+  await new Promise(r => setTimeout(r, 150));
+  const EURC   = await fetchTokenBal("0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a", addr, 1e6);
+  await new Promise(r => setTimeout(r, 150));
+  const cirBTC = await fetchTokenBal("0xf0C4a4CE82A5746AbAAd9425360Ab04fbBA432BF", addr, 1e8);
+  await new Promise(r => setTimeout(r, 150));
+  const nativeRaw = await rpcFetch("eth_getBalance", [addr, "latest"]);
+  const ARC = nativeRaw && nativeRaw !== "0x"
+    ? (() => { try { return Number(BigInt(nativeRaw)) / 1e18; } catch { return 0; } })()
+    : 0;
 
-  // All 4 calls in parallel — fast and works fine with Arc RPC
-  const [usdcRaw, eurcRaw, cirbtcRaw, nativeRaw] = await Promise.all([
-    rpcFetch("eth_call", [{to:"0x3600000000000000000000000000000000000000", data:"0x70a08231"+pad}, "latest"]),
-    rpcFetch("eth_call", [{to:"0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a", data:"0x70a08231"+pad}, "latest"]),
-    rpcFetch("eth_call", [{to:"0xf0C4a4CE82A5746AbAAd9425360Ab04fbBA432BF", data:"0x70a08231"+pad}, "latest"]),
-    rpcFetch("eth_getBalance", [addr, "latest"]),
-  ]);
-
-  return {
-    USDC:   parse(usdcRaw,   1e6),
-    EURC:   parse(eurcRaw,   1e6),
-    cirBTC: parse(cirbtcRaw, 1e8),
-    ARC:    parse(nativeRaw, 1e18),
-    ETH:    0,
-  };
+  return { USDC, EURC, cirBTC, ARC, ETH: 0 };
 }
 
 export function WalletProvider({ children }: { children: ReactNode }) {
@@ -87,12 +99,13 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     const balances = await fetchBal(addr);
     setWallet(p => ({ ...p, balancesLoading: false, balances }));
 
-    // If all zeros and wallet should have balance → auto-retry up to 2 times
+    // Retry if fetch failed (all zeros) — the sequential fetch + per-token retry
+    // already handles most cases, but this is a final safety net.
     if (isFetchFailed(balances) && attempt < 2) {
-      const delay = (attempt + 1) * 2000; // 2s then 4s
+      const delay = (attempt + 1) * 3000;
       retryRef.current = setTimeout(() => loadBal(addr, attempt + 1), delay);
     } else if (isFetchFailed(balances)) {
-      setFailed(true); // show retry button after all attempts fail
+      setFailed(true);
     }
   }, []);
 

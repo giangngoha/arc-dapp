@@ -6,6 +6,19 @@ import { useWallet, getBal } from "./WalletProvider";
 import WalletModal from "./WalletModal";
 import { ARC_RPC, ARC_EXPLORER } from "@/lib/contracts";
 
+// Arc Network logo — uses the official Arc logo image from /public/arc-logo.png
+function ArcLogoIcon({ size = 16 }: { size?: number }) {
+  return (
+    <img
+      src="/arc-logo.png"
+      alt="Arc Network"
+      width={size}
+      height={size}
+      style={{ objectFit: "contain", display: "block" }}
+    />
+  );
+}
+
 const LINKS = [
   { href:"/swap",      label:"Exchange"   },
   { href:"/pool",      label:"Pools"      },
@@ -15,9 +28,9 @@ const LINKS = [
 ];
 
 const CHAINS = [
-  { id:"arc",     label:"Arc Testnet", hex:"0x4cef52", dot:"#00b4d8", rpc:ARC_RPC,              explorer:ARC_EXPLORER,        nativeCurrency:{name:"USDC",symbol:"USDC",decimals:18} },
-  { id:"sepolia", label:"Eth Sepolia", hex:"0xaa36a7", dot:"#627EEA", rpc:"https://ethereum-sepolia-rpc.publicnode.com", explorer:"https://sepolia.etherscan.io",       nativeCurrency:{name:"ETH",symbol:"ETH",decimals:18}  },
-  { id:"fuji",    label:"Avax Fuji",   hex:"0xa869",   dot:"#E84142", rpc:"https://api.avax-test.network/ext/bc/C/rpc",   explorer:"https://testnet.snowtrace.io",       nativeCurrency:{name:"AVAX",symbol:"AVAX",decimals:18} },
+  { id:"arc",     label:"Arc Testnet", hex:"0x4cef52", dot:"#00b4d8", isArcChain: true,  rpc:ARC_RPC,              explorer:ARC_EXPLORER,        nativeCurrency:{name:"USDC",symbol:"USDC",decimals:18} },
+  { id:"sepolia", label:"Eth Sepolia", hex:"0xaa36a7", dot:"#627EEA", isArcChain: false, rpc:"https://ethereum-sepolia-rpc.publicnode.com", explorer:"https://sepolia.etherscan.io",       nativeCurrency:{name:"ETH",symbol:"ETH",decimals:18}  },
+  { id:"fuji",    label:"Avax Fuji",   hex:"0xa869",   dot:"#E84142", isArcChain: false, rpc:"https://api.avax-test.network/ext/bc/C/rpc",   explorer:"https://testnet.snowtrace.io",       nativeCurrency:{name:"AVAX",symbol:"AVAX",decimals:18} },
 ];
 
 function short(a:string){ return a.slice(0,6)+"…"+a.slice(-4); }
@@ -122,7 +135,10 @@ export default function Nav() {
             onMouseEnter={e=>(e.currentTarget.style.borderColor="var(--border2)")}
             onMouseLeave={e=>(e.currentTarget.style.borderColor="var(--border)")}
           >
-            <div style={{width:8,height:8,borderRadius:"50%",background:activeChain.dot,boxShadow:`0 0 4px ${activeChain.dot}`}}/>
+            {activeChain.isArcChain
+              ? <ArcLogoIcon size={14} />
+              : <div style={{width:8,height:8,borderRadius:"50%",background:activeChain.dot,boxShadow:`0 0 4px ${activeChain.dot}`}}/>
+            }
             {activeChain.label}
             <svg width="8" height="5" viewBox="0 0 10 6" fill="none"><path d="M1 1l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
           </button>
@@ -134,7 +150,10 @@ export default function Nav() {
                   onMouseEnter={e=>(e.currentTarget.style.background="var(--bg2)")}
                   onMouseLeave={e=>(e.currentTarget.style.background=currentHex===chain.hex?"var(--bg2)":"transparent")}
                 >
-                  <div style={{width:8,height:8,borderRadius:"50%",background:chain.dot,flexShrink:0}}/>
+                  {chain.isArcChain
+                    ? <ArcLogoIcon size={14} />
+                    : <div style={{width:8,height:8,borderRadius:"50%",background:chain.dot,flexShrink:0}}/>
+                  }
                   {chain.label}
                   {currentHex===chain.hex&&<span style={{marginLeft:"auto",fontSize:10,color:"var(--cyan)"}}>✓</span>}
                 </button>
