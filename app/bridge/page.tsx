@@ -404,7 +404,32 @@ export default function BridgePage() {
   const [now,      setNow]     = useState(Date.now());
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  useEffect(() => { setPending(loadPending()); }, []);
+  useEffect(() => {
+    const saved = loadPending();
+    setPending(saved);
+    // On mount: immediately check attestation for any attesting bridges past the delay
+    const toCheck = saved.filter(b => b.status === "attesting" && (Date.now() - b.burnedAt) >= POLL_DELAY_MS);
+    if (toCheck.length > 0) {
+      // Run async without blocking render
+      (async () => {
+        let changed = false;
+        const updated = await Promise.all(saved.map(async (b) => {
+          if (b.status !== "attesting" || (Date.now() - b.burnedAt) < POLL_DELAY_MS) return b;
+          const result = await checkAttestationOnce(b.srcDomain, b.burnTxHash);
+          if (result) {
+            changed = true;
+            return { ...b, status: "ready" as const, message: result.message, attestation: result.attestation };
+          }
+          return b;
+        }));
+        if (changed) {
+          savePending(updated);
+          setPending(updated);
+          showToast(true, "Attestation Ready ✓", "A bridge is ready to mint!");
+        }
+      })();
+    }
+  }, []);
 
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 1000);
@@ -596,6 +621,7 @@ export default function BridgePage() {
   const stepActive = (s: BridgeStep) => step === s;
 
   // Separate active (attesting/ready/minting/failed) from completed
+  const activePending    = pending.filter(b => b.status !== "completed");
   const completedPending = pending.filter(b => b.status === "completed");
 
   return (
@@ -769,22 +795,39 @@ export default function BridgePage() {
         <div style={{ background: "var(--bg1)", border: "1px solid var(--border)", borderRadius: 16, padding: "14px 14px 12px" }}>
           {/* Header */}
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
-            <span style={{ fontSize: 12, fontWeight: 700, color: "var(--text1)", letterSpacing: "0.2px" }}>History</span>
-            {completedPending.length > 0 && (
-              <span style={{ fontSize: 9, background: "rgba(0,200,150,0.12)", color: "var(--green)", borderRadius: 20, padding: "2px 7px", fontFamily: "var(--mono)", fontWeight: 700 }}>
-                {completedPending.length} completed
-              </span>
-            )}
+            <span style={{ fontSize: 12, fontWeight: 700, color: "var(--text1)", letterSpacing: "0.2px" }}>Bridge Status</span>
+            <div style={{ display: "flex", gap: 6 }}>
+              {activePending.length > 0 && (
+                <span style={{ fontSize: 9, background: "rgba(0,229,255,0.12)", color: "var(--cyan)", borderRadius: 20, padding: "2px 7px", fontFamily: "var(--mono)", fontWeight: 700 }}>
+                  {activePending.length} active
+                </span>
+              )}
+              {completedPending.length > 0 && (
+                <span style={{ fontSize: 9, background: "rgba(0,200,150,0.12)", color: "var(--green)", borderRadius: 20, padding: "2px 7px", fontFamily: "var(--mono)", fontWeight: 700 }}>
+                  {completedPending.length} done
+                </span>
+              )}
+            </div>
           </div>
 
-          {completedPending.length === 0 ? (
+          {activePending.length === 0 && completedPending.length === 0 ? (
             <div style={{ textAlign: "center", padding: "24px 0", color: "var(--text2)", fontSize: 11, fontFamily: "var(--mono)" }}>
               <div style={{ fontSize: 20, marginBottom: 6, opacity: 0.25 }}>⇄</div>
-              No completed bridges yet
+              No bridges yet
             </div>
           ) : (
-            /* Single scrollable area — shows 5 cards (≈80px each = 400px), scroll for more */
-            <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 400, overflowY: "auto", paddingRight: 2 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 520, overflowY: "auto", paddingRight: 2 }}>
+              {/* Active bridges first (attesting / ready / minting / failed) */}
+              {activePending.slice().reverse().map(b => (
+                <PendingBridgeCard key={b.id} bridge={b} now={now} onMint={handleMint} onDismiss={dismissPending} />
+              ))}
+
+              {/* Divider between active and completed */}
+              {activePending.length > 0 && completedPending.length > 0 && (
+                <div style={{ borderTop: "1px solid var(--border)", margin: "4px 0", opacity: 0.5 }} />
+              )}
+
+              {/* Completed bridges */}
               {completedPending.slice().reverse().map(b => (
                 <HistoryCard key={b.id} bridge={b} onDismiss={dismissPending} />
               ))}
