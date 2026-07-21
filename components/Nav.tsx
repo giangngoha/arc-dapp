@@ -21,6 +21,7 @@ function ArcLogoIcon({ size = 16 }: { size?: number }) {
 
 const LINKS = [
   { href:"/swap",      label:"Exchange"   },
+  { href:"/farm",      label:"Farm"       },
   { href:"/pool",      label:"Pools"      },
   { href:"/bridge",    label:"Bridge"     },
   { href:"/send",      label:"Send Tokens"},
@@ -44,11 +45,11 @@ export default function Nav() {
   const [chainOpen,   setChainOpen] = useState(false);
   const [currentHex,  setCurrentHex]= useState<string|null>(null);
   const [copied,      setCopied]    = useState(false);
-  const [nativeBal,   setNativeBal] = useState<number|null>(null); // native token balance for non-Arc chains
+  const [nativeBal,   setNativeBal] = useState<number|null>(null);
   const menuRef  = useRef<HTMLDivElement>(null);
   const chainRef = useRef<HTMLDivElement>(null);
 
-  // Fetch real gas price from current chain RPC every 12 seconds
+  // Fetch real gas price every 12 seconds
   useEffect(()=>{
     async function fetchGas(){
       const chain = CHAINS.find(c=>c.hex===currentHex) ?? CHAINS[0];
@@ -63,7 +64,7 @@ export default function Nav() {
     return ()=>clearInterval(id);
   },[currentHex]);
 
-  // Fetch native token balance when on non-Arc chains (ETH on Sepolia, AVAX on Fuji)
+  // Fetch native balance on non-Arc chains
   useEffect(()=>{
     const isArc = currentHex === "0x4cef52";
     if (isArc || !wallet.connected || !wallet.address) { setNativeBal(null); return; }
@@ -81,6 +82,7 @@ export default function Nav() {
     const id = setInterval(fetchNativeBal, 15000);
     return ()=>clearInterval(id);
   },[currentHex, wallet.connected, wallet.address]);
+
   useEffect(()=>{ const h=(e:MouseEvent)=>{ if(menuRef.current&&!menuRef.current.contains(e.target as Node))setMenu(false); if(chainRef.current&&!chainRef.current.contains(e.target as Node))setChainOpen(false); }; document.addEventListener("mousedown",h); return ()=>document.removeEventListener("mousedown",h); },[]);
 
   // Detect current chain from MetaMask
@@ -107,7 +109,6 @@ export default function Nav() {
   }
 
   const activeChain = CHAINS.find(c=>c.hex===currentHex) ?? CHAINS[0];
-
 
   return (
     <>
@@ -191,7 +192,6 @@ export default function Nav() {
                   </button>
                 </div>
                 {currentHex === "0x4cef52" ? (
-                  // Arc chain — show USDC / EURC / cirBTC balances
                   wallet.balancesLoading ? (
                     <div style={{padding:"10px 12px",fontSize:12,color:"var(--text2)",fontFamily:"var(--mono)",display:"flex",gap:6}}>
                       <span className="spinner" style={{borderTopColor:"var(--cyan)"}}/>Loading…
@@ -214,7 +214,6 @@ export default function Nav() {
                     ))
                   )
                 ) : (
-                  // Non-Arc chain — show native token balance (ETH / AVAX)
                   <div className="menu-bal">
                     <span className="mk">{CHAINS.find(c=>c.hex===currentHex)?.nativeCurrency.symbol ?? "ETH"}</span>
                     <span style={{fontFamily:"var(--mono)"}}>

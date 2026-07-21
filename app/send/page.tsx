@@ -16,6 +16,18 @@ const BUILTIN = [
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function isAddr(a:string){ return /^0x[0-9a-fA-F]{40}$/.test(a.trim()); }
+
+// Large approval: 1 billion tokens — avoids MAX_U256 NFT warning in MetaMask
+function makeLargeApproval(decimals: number): bigint {
+  return BigInt(1_000_000_000) * BigInt(10 ** decimals);
+}
+// Safely parse allowance RPC result
+function safeAllowance(raw: string): bigint {
+  try {
+    if (!raw || raw === "0x" || raw === "0x0") return 0n;
+    return BigInt(raw);
+  } catch { return 0n; }
+}
 function parseAbiStr(hex:string){ try{ const r=hex.slice(2); if(r.length<128)return""; const l=parseInt(r.slice(64,128),16); return Buffer.from(r.slice(128,128+l*2),"hex").toString("utf8").replace(/\0/g,"").trim(); }catch{return"";} }
 
 async function switchToArc(){
@@ -214,13 +226,16 @@ export default function SendPage(){
       // 1. Check allowance
       setBulkStat("Checking allowance…");
       const allowHex = await rpcEthCall(bulkTok.addr, encodeAllowance(wallet.address, MULTISEND_ADDR));
-      const currentAllow = allowHex&&allowHex!=="0x" ? BigInt(allowHex) : 0n;
+      const currentAllow = safeAllowance(allowHex);
 
+      // Only approve if current allowance is insufficient — avoids redundant wallet prompts
       if(currentAllow < totalRaw){
-        setBulkStat(`Approving ${(Number(totalRaw)/10**bulkDec).toFixed(bulkDec>=8?8:2)} ${bulkSym} — confirm in wallet…`);
+        // Approve a large amount so future bulk sends don't re-prompt
+        const approveAmt = makeLargeApproval(bulkDec);
+        setBulkStat(`Approving ${bulkSym} — confirm in wallet…`);
         const approveTx:string = await eth.request({
           method:"eth_sendTransaction",
-          params:[{from:wallet.address, to:bulkTok.addr, data:encodeApprove(MULTISEND_ADDR,totalRaw), gas:"0x186A0"}]
+          params:[{from:wallet.address, to:bulkTok.addr, data:encodeApprove(MULTISEND_ADDR,approveAmt), gas:"0x186A0"}]
         });
         setBulkStat("Waiting for approval…");
         const ok = await waitTx(approveTx);

@@ -27,13 +27,7 @@ function encodeGetPair(tA: string, tB: string): string {
   return "0xe6a43905" + tA.toLowerCase().replace("0x","").padStart(64,"0") + tB.toLowerCase().replace("0x","").padStart(64,"0");
 }
 
-// Use a large but not MAX_U256 value to avoid MetaMask showing NFT withdrawal warning.
-// MAX_U256 triggers NFT-style approval UI in some wallets.
-// We use a practical "unlimited" that is clearly a token amount (1 trillion units at 6 decimals = 1e18 raw).
-function makeLargeApproval(decimals: number): bigint {
-  // 1 billion tokens * 10^decimals — enough to never re-approve in practice
-  return BigInt(1_000_000_000) * BigInt(10 ** decimals);
-}
+const MAX_U256 = BigInt("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
 
 // ─── ABI Encoders ─────────────────────────────────────────────────────────────
 function pad32(val: string | bigint, isAddr = false) {
@@ -51,17 +45,47 @@ const encodeTotalSupply  = () => "0x18160ddd";
 const encodeBalanceOfLP  = (a:string) => "0x70a08231"+pad32(a,true);
 
 // ─── RPC / helpers ───────────────────────────────────────────────────────────
-// Calculate APR from Swap events in the last 24h
 // Swap event topic: keccak256("Swap(address,uint256,uint256,uint256,uint256,address)")
 const SWAP_TOPIC = "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822";
 
-async function getVolume24h(pairAddr: string, tokenADecimals: number): Promise<number> {
+// Cache BTC price for 5 minutes to avoid hammering the price API
+let btcPriceCache: { usd: number; fetchedAt: number } | null = null;
+
+async function getBtcPriceUSD(): Promise<number> {
+  // Return cached price if fresh (< 5 min old)
+  if (btcPriceCache && Date.now() - btcPriceCache.fetchedAt < 5 * 60 * 1000) {
+    return btcPriceCache.usd;
+  }
   try {
-    // Get current block number
+    const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd", {
+      signal: AbortSignal.timeout(5000),
+    });
+    const j = await res.json();
+    const usd = j?.bitcoin?.usd ?? 0;
+    if (usd > 0) btcPriceCache = { usd, fetchedAt: Date.now() };
+    return usd;
+  } catch {
+    // Fall back to cached value even if stale, or a reasonable default
+    return btcPriceCache?.usd ?? 95000;
+  }
+}
+
+// Returns 24h trading volume in USD for the given pair.
+// Uses Swap event logs from the last ~24h of blocks.
+// For pairs containing cirBTC, fetches live BTC price to convert volume to USD correctly.
+async function getVolume24h(
+  pairAddr: string,
+  tokenADecimals: number,
+  tokenBDecimals: number,
+  tokenASymbol: string,
+  tokenBSymbol: string,
+): Promise<number> {
+  try {
     const blockHex = await rpc("eth_blockNumber", []) as string;
     const currentBlock = parseInt(blockHex, 16);
-    // ~24h = 7200 blocks (Arc ~12s/block)
-    const fromBlock = Math.max(0, currentBlock - 7200).toString(16);
+    // Arc Testnet produces ~1 block per 2s → ~43200 blocks/day.
+    // Use a conservative 40000-block window to cover 24h.
+    const fromBlock = Math.max(0, currentBlock - 40000).toString(16);
     const logs: any = await rpc("eth_getLogs", [{
       address: pairAddr,
       topics:  [SWAP_TOPIC],
@@ -69,16 +93,27 @@ async function getVolume24h(pairAddr: string, tokenADecimals: number): Promise<n
       toBlock:   "latest",
     }]);
     if (!logs || !Array.isArray(logs)) return 0;
-    // Each Swap log: amount0In(32) amount1In(32) amount0Out(32) amount1Out(32)
-    let totalVol = 0;
+
+    // Determine price multipliers for each token side
+    // Stablecoins (USDC, EURC) ≈ $1. cirBTC needs live BTC price.
+    const hasBTC = tokenASymbol === "cirBTC" || tokenBSymbol === "cirBTC";
+    const btcPrice = hasBTC ? await getBtcPriceUSD() : 1;
+    const priceA = tokenASymbol === "cirBTC" ? btcPrice : 1;
+    const priceB = tokenBSymbol === "cirBTC" ? btcPrice : 1;
+
+    // Each Swap log data: amount0In(32) | amount1In(32) | amount0Out(32) | amount1Out(32)
+    // Uniswap V2 sorts tokens by address; token0 = lower address.
+    // We count only the "in" side of each swap to avoid double-counting.
+    let totalVolUSD = 0;
     for (const log of logs) {
       const d = log.data.replace("0x","");
       if (d.length < 256) continue;
-      const a0in  = Number(BigInt("0x"+d.slice(0,64)))   / 10**tokenADecimals;
-      const a0out = Number(BigInt("0x"+d.slice(128,192))) / 10**tokenADecimals;
-      totalVol += a0in + a0out; // volume in tokenA units (USDC or EURC ≈ $1)
+      const amt0in = Number(BigInt("0x" + d.slice(0,   64))) / 10 ** tokenADecimals;
+      const amt1in = Number(BigInt("0x" + d.slice(64, 128))) / 10 ** tokenBDecimals;
+      // Only one of amt0in / amt1in is non-zero per swap — sum both safely
+      totalVolUSD += amt0in * priceA + amt1in * priceB;
     }
-    return totalVol;
+    return totalVolUSD;
   } catch { return 0; }
 }
 
@@ -115,14 +150,6 @@ async function waitTx(hash:string,maxMs=90000):Promise<boolean> {
   const start=Date.now();
   while(Date.now()-start<maxMs){await new Promise(r=>setTimeout(r,3000));try{const r:any=await rpc("eth_getTransactionReceipt",[hash]);if(r?.blockNumber)return r.status==="0x1"||r.status===1;}catch{}}
   return false;
-}
-
-// Safely parse an eth_call result as BigInt (returns 0n if null/empty/error)
-function safeAllowance(raw: unknown): bigint {
-  try {
-    if (!raw || raw === "0x" || raw === "0x0") return 0n;
-    return BigInt(raw as string);
-  } catch { return 0n; }
 }
 
 // ─── Sub-components ──────────────────────────────────────────────────────────
@@ -205,11 +232,24 @@ function PoolDetail({pool,wallet,openModal,refreshBalances,onBack}:{pool:PoolDef
       const totalSupply = supRaw&&supRaw!=="0x" ? Number(BigInt(supRaw as string))/1e18 : 0;
       const userLp = lpRaw&&lpRaw!=="0x"&&lpRaw!=="0x0" ? Number(BigInt(lpRaw as string))/1e18 : 0;
       const sharePct = totalSupply>0 ? userLp/totalSupply*100 : 0;
-      // TVL = resA * 2 (assume tokenA ≈ USD, e.g. USDC/EURC both ~$1, cirBTC excluded)
-      const tvlUSD = resA * 2;
-      // Volume 24h from Swap events
-      const vol24h = await getVolume24h(pool.pair, tA.decimals);
-      // APR = fee 0.3% × volume24h × 365 / TVL
+      // Compute TVL in USD, accounting for cirBTC price.
+      // For stablecoin pairs (USDC/EURC): TVL = resA * 2 (both sides ≈ $1).
+      // For pairs with cirBTC: fetch live BTC price and use it for the BTC side.
+      let tvlUSD: number;
+      const hasBTC = pool.tokenA === "cirBTC" || pool.tokenB === "cirBTC";
+      if (hasBTC) {
+        const btcPrice = await getBtcPriceUSD();
+        const priceA = pool.tokenA === "cirBTC" ? btcPrice : 1;
+        const priceB = pool.tokenB === "cirBTC" ? btcPrice : 1;
+        tvlUSD = resA * priceA + resB * priceB;
+      } else {
+        // Both tokens are stablecoins — mirror both sides
+        tvlUSD = resA * 2;
+      }
+      // Volume 24h from Swap events (returned in USD)
+      const vol24h = await getVolume24h(pool.pair, tA.decimals, tB.decimals, pool.tokenA, pool.tokenB);
+      // APR = (fee rate 0.3% × annualised volume) / TVL × 100
+      // This matches the standard Uniswap V2 LP APR formula.
       const apr = tvlUSD > 0 && vol24h > 0 ? (0.003 * vol24h * 365 / tvlUSD * 100) : null;
       setInfo({resA,resB,totalSupply,userLp,sharePct,userA:resA*(sharePct/100),userB:resB*(sharePct/100),tvlUSD,apr});
     } catch(e){console.error(e);}
@@ -239,27 +279,22 @@ function PoolDetail({pool,wallet,openModal,refreshBalances,onBack}:{pool:PoolDef
       const minA=toUnits(amtA*(1-slip/100),tA.decimals),minB=toUnits(amtB*(1-slip/100),tB.decimals);
       const deadline=BigInt(Math.floor(Date.now()/1000)+1200);
 
-      // Approve A — only if current allowance is insufficient
+      // Approve A
       setStat(`Checking ${pool.tokenA} allowance…`);
-      const allARaw = await rpc("eth_call",[{to:tA.addr,data:encodeAllowance(wallet.address,ROUTER)},"latest"]);
-      const currentAllA = safeAllowance(allARaw);
-      if(currentAllA < rawA){
-        // Approve a large practical amount (avoids MAX_U256 which triggers NFT warning in wallets)
-        const approveAmtA = makeLargeApproval(tA.decimals);
+      const allA:any=await rpc("eth_call",[{to:tA.addr,data:encodeAllowance(wallet.address,ROUTER)},"latest"]);
+      if(!allA||BigInt(allA)<rawA){
         setStat(`Approve ${pool.tokenA}…`);
-        const tx:string=await eth.request({method:"eth_sendTransaction",params:[{from:wallet.address,to:tA.addr,data:encodeApprove(ROUTER,approveAmtA),gas:"0x186A0"}]});
-        setStat("Waiting for approve…");if(!await waitTx(tx))throw new Error("Approve A failed");
+        const tx:string=await eth.request({method:"eth_sendTransaction",params:[{from:wallet.address,to:tA.addr,data:encodeApprove(ROUTER,MAX_U256),gas:"0x186A0"}]});
+        setStat("Waiting…");if(!await waitTx(tx))throw new Error("Approve A failed");
         await new Promise(r=>setTimeout(r,2000));
       }
-      // Approve B — only if current allowance is insufficient
+      // Approve B
       setStat(`Checking ${pool.tokenB} allowance…`);
-      const allBRaw = await rpc("eth_call",[{to:tB.addr,data:encodeAllowance(wallet.address,ROUTER)},"latest"]);
-      const currentAllB = safeAllowance(allBRaw);
-      if(currentAllB < rawB){
-        const approveAmtB = makeLargeApproval(tB.decimals);
+      const allB:any=await rpc("eth_call",[{to:tB.addr,data:encodeAllowance(wallet.address,ROUTER)},"latest"]);
+      if(!allB||BigInt(allB)<rawB){
         setStat(`Approve ${pool.tokenB}…`);
-        const tx:string=await eth.request({method:"eth_sendTransaction",params:[{from:wallet.address,to:tB.addr,data:encodeApprove(ROUTER,approveAmtB),gas:"0x186A0"}]});
-        setStat("Waiting for approve…");if(!await waitTx(tx))throw new Error("Approve B failed");
+        const tx:string=await eth.request({method:"eth_sendTransaction",params:[{from:wallet.address,to:tB.addr,data:encodeApprove(ROUTER,MAX_U256),gas:"0x186A0"}]});
+        setStat("Waiting…");if(!await waitTx(tx))throw new Error("Approve B failed");
         await new Promise(r=>setTimeout(r,2000));
       }
       // addLiquidity
@@ -289,15 +324,11 @@ function PoolDetail({pool,wallet,openModal,refreshBalances,onBack}:{pool:PoolDef
       const minA=toUnits(info.userA*(pct/100)*(1-slip/100),tA.decimals);
       const minB=toUnits(info.userB*(pct/100)*(1-slip/100),tB.decimals);
       const deadline=BigInt(Math.floor(Date.now()/1000)+1200);
-      // Approve LP token — only if current allowance is insufficient
-      setStat("Checking LP allowance…");
-      const allLPRaw = await rpc("eth_call",[{to:pool.pair,data:encodeAllowance(wallet.address,ROUTER)},"latest"]);
-      const currentAllLP = safeAllowance(allLPRaw);
-      if(currentAllLP < lpRaw){
-        // LP tokens use 18 decimals; approve a large practical amount
-        const approveLP = makeLargeApproval(18);
-        setStat("Approving LP token…");
-        const tx:string=await eth.request({method:"eth_sendTransaction",params:[{from:wallet.address,to:pool.pair,data:encodeApprove(ROUTER,approveLP),gas:"0x186A0"}]});
+      // Approve LP
+      setStat("Approving LP token…");
+      const allLP:any=await rpc("eth_call",[{to:pool.pair,data:encodeAllowance(wallet.address,ROUTER)},"latest"]);
+      if(!allLP||BigInt(allLP)<lpRaw){
+        const tx:string=await eth.request({method:"eth_sendTransaction",params:[{from:wallet.address,to:pool.pair,data:encodeApprove(ROUTER,MAX_U256),gas:"0x186A0"}]});
         setStat("Waiting LP approve…");if(!await waitTx(tx))throw new Error("LP approve failed");
         await new Promise(r=>setTimeout(r,2000));
       }

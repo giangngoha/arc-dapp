@@ -36,6 +36,11 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
+# Foundry
+contracts/cache/
+contracts/out/
+contracts/contracts/script/depositfundtoContract.sh
+
 #debug
 debug_swap.mjs
 debug_swap2.mjs

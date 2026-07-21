@@ -26,3 +26,38 @@ export function fromUnits(raw:bigint,decimals=6):number { return Number(raw)/10*
 export function encodeBalanceOf(addr:string):string { return "0x70a08231"+addr.toLowerCase().replace("0x","").padStart(64,"0"); }
 export function encodeApprove(spender:string,amount:bigint):string { return "0x095ea7b3"+spender.toLowerCase().replace("0x","").padStart(64,"0")+amount.toString(16).padStart(64,"0"); }
 export function encodeAllowance(owner:string,spender:string):string { return "0xdd62ed3e"+owner.toLowerCase().replace("0x","").padStart(64,"0")+spender.toLowerCase().replace("0x","").padStart(64,"0"); }
+
+// Register a token as ERC-20 with MetaMask using wallet_watchAsset.
+// This tells MetaMask the contract is a fungible token, preventing it from
+// misidentifying the approve() call as an NFT withdrawal request.
+// Safe to call multiple times — MetaMask silently skips if already registered.
+export async function registerTokenWithMetaMask(
+  symbol: string,
+  address: string,
+  decimals: number,
+  image?: string,
+): Promise<void> {
+  try {
+    const eth = (window as any).ethereum;
+    if (!eth) return;
+    await eth.request({
+      method: "wallet_watchAsset",
+      params: {
+        type: "ERC20",
+        options: { address, symbol, decimals, image },
+      },
+    });
+  } catch {
+    // Non-critical — ignore errors (user may dismiss, or wallet may not support)
+  }
+}
+
+// Pre-register all Arc Testnet tokens so MetaMask treats them as ERC-20.
+// Call this once after wallet connects or before any approve transaction.
+export async function registerArcTokens(): Promise<void> {
+  await Promise.allSettled([
+    registerTokenWithMetaMask("USDC",   CONTRACTS.USDC,   6),
+    registerTokenWithMetaMask("EURC",   CONTRACTS.EURC,   6),
+    registerTokenWithMetaMask("cirBTC", CONTRACTS.cirBTC, 8),
+  ]);
+}

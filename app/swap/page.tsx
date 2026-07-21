@@ -9,7 +9,18 @@ const PAIR     = "0x5eFf76b80A58ea34b23d0981bCCe2E639171c9cb";
 const USDC     = CONTRACTS.USDC;
 const EURC     = CONTRACTS.EURC;
 const cirBTC   = CONTRACTS.cirBTC;
-const MAX_U256 = BigInt("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+// Large approval: 1 billion tokens per decimals.
+// Avoids MAX_U256 which MetaMask misidentifies as an NFT setApprovalForAll call.
+function makeLargeApproval(decimals: number): bigint {
+  return BigInt(1_000_000_000) * BigInt(10 ** decimals);
+}
+// Safely parse an allowance RPC result — returns 0n on null/empty/error
+function safeAllowance(raw: unknown): bigint {
+  try {
+    if (!raw || raw === "0x" || raw === "0x0") return 0n;
+    return BigInt(raw as string);
+  } catch { return 0n; }
+}
 const GAS_APPROVE = "0x186A0";
 const GAS_SWAP    = "0x493E0";
 
@@ -32,7 +43,8 @@ function addrColor(addr: string): string {
   return `hsl(${h}, 65%, 50%)`;
 }
 
-// Route map — 2-hop when no direct pair exists
+// Static route map — used as fallback and for building candidate paths.
+// Direct paths (2 tokens) are always tried first; multi-hop only used when better.
 const ROUTES: Record<string, string[]> = {
   "USDC-EURC":   [USDC, EURC],
   "EURC-USDC":   [EURC, USDC],
@@ -41,6 +53,79 @@ const ROUTES: Record<string, string[]> = {
   "EURC-cirBTC": [EURC, USDC, cirBTC],
   "cirBTC-EURC": [cirBTC, USDC, EURC],
 };
+
+// All possible intermediate tokens for building candidate multi-hop paths.
+const HOP_TOKENS = [USDC, EURC, cirBTC];
+
+// Find the best swap path for a given tokenIn → tokenOut and amountIn.
+// Queries all candidate paths (direct + all 1-hop intermediates) in parallel
+// and returns the path that yields the highest amountOut.
+// Falls back to the static ROUTES entry if all on-chain queries fail.
+async function findBestPath(
+  tokenInAddr: string,
+  tokenOutAddr: string,
+  amtInRaw: bigint,
+  staticPath: string[],
+): Promise<{ path: string[]; amtOutRaw: bigint; isOptimal: boolean }> {
+  // Build candidate paths: direct + via each intermediate token
+  const candidates: string[][] = [];
+
+  // Direct path (only if different tokens)
+  if (tokenInAddr.toLowerCase() !== tokenOutAddr.toLowerCase()) {
+    candidates.push([tokenInAddr, tokenOutAddr]);
+  }
+
+  // Single-hop paths via each intermediate
+  for (const hop of HOP_TOKENS) {
+    const h = hop.toLowerCase();
+    const inL = tokenInAddr.toLowerCase();
+    const outL = tokenOutAddr.toLowerCase();
+    if (h !== inL && h !== outL) {
+      candidates.push([tokenInAddr, hop, tokenOutAddr]);
+    }
+  }
+
+  // Deduplicate candidates (avoid querying the same path twice)
+  const seen = new Set<string>();
+  const unique = candidates.filter(p => {
+    const key = p.map(a => a.toLowerCase()).join("-");
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
+  // Query all candidate paths in parallel
+  const results = await Promise.all(
+    unique.map(async (path) => {
+      try {
+        const data = encodeGetAmountsOut(amtInRaw, path);
+        const r: any = await rpcCall("eth_call", [{ to: ROUTER, data }, "latest"]);
+        if (!r || r === "0x") return null;
+        const hex = r.replace("0x", "");
+        const lastIdx = 128 + (path.length - 1) * 64;
+        if (hex.length < lastIdx + 64) return null;
+        const amtOutRaw = BigInt("0x" + hex.slice(lastIdx, lastIdx + 64));
+        return { path, amtOutRaw };
+      } catch {
+        return null;
+      }
+    })
+  );
+
+  // Pick the path with the highest amountOut
+  let best: { path: string[]; amtOutRaw: bigint } | null = null;
+  for (const r of results) {
+    if (!r) continue;
+    if (!best || r.amtOutRaw > best.amtOutRaw) best = r;
+  }
+
+  if (!best) {
+    // All queries failed — fall back to static route without an amountOut estimate
+    return { path: staticPath, amtOutRaw: 0n, isOptimal: false };
+  }
+
+  return { path: best.path, amtOutRaw: best.amtOutRaw, isOptimal: true };
+}
 
 function encodeGetAmountsOut(amtIn: bigint, path: string[]): string {
   const sel    = "0xd06ca61f";
@@ -365,8 +450,14 @@ export default function SwapPage() {
   const debounce  = useRef<ReturnType<typeof setTimeout>|null>(null);
   const refreshTimer = useRef<ReturnType<typeof setInterval>|null>(null);
 
+  // Best path found by the optimizer — updated whenever amountIn/tokenIn/tokenOut changes
+  const [bestPath, setBestPath] = useState<string[] | null>(null);
+  const [pathLabel, setPathLabel] = useState<string>("");
+
   const routeKey    = `${tokenIn}-${tokenOut}`;
-  const path        = ROUTES_DYNAMIC[routeKey] ?? [USDC, EURC];
+  const staticPath  = ROUTES_DYNAMIC[routeKey] ?? [USDC, EURC];
+  // Use optimizer-selected path when available, otherwise fall back to static route
+  const path        = bestPath ?? staticPath;
   const isMultiHop  = path.length > 2;
   const tokenInDec  = TOKEN_META[tokenIn]?.decimals  ?? 6;
   const tokenOutDec = TOKEN_META[tokenOut]?.decimals ?? 6;
@@ -389,30 +480,49 @@ export default function SwapPage() {
       }).catch(()=>{});
   },[tokenIn, tokenOut, isMultiHop]);
 
-  // Auto-estimate
+  // Auto-estimate: runs path optimizer then displays best quote.
+  // Resets bestPath on token/amount change so the optimizer always re-runs fresh.
   useEffect(()=>{
-    if (!amtNum||amtNum<=0) { setEstimate(null); return; }
+    if (!amtNum||amtNum<=0) { setEstimate(null); setBestPath(null); setPathLabel(""); return; }
     if (debounce.current) clearTimeout(debounce.current);
     debounce.current = setTimeout(async()=>{
       setEstimating(true);
+      setBestPath(null); // clear previous best so we use staticPath during query
       try {
         const amtInRaw = toUnits(amtNum, tokenInDec);
-        const data = encodeGetAmountsOut(amtInRaw, path);
-        const r:any = await rpcCall("eth_call",[{ to:ROUTER, data },"latest"]);
-        if (!r||r==="0x") { setEstimate(null); return; }
-        const hex = r.replace("0x","");
-        const lastIdx = 128 + (path.length - 1) * 64;
-        const amtOutRaw = BigInt("0x"+hex.slice(lastIdx, lastIdx+64));
-        const amtOut = Number(amtOutRaw)/10**tokenOutDec;
-        const rate   = (amtOut/amtNum).toFixed(tokenOutDec===8?8:6);
-        // Impact chỉ có ý nghĩa khi cùng đơn vị (USDC↔EURC, single-hop)
-        const impact = (!isMultiHop && tokenInDec===tokenOutDec)
-          ? (Math.abs(1-amtOut/amtNum)*100).toFixed(2)
+        const tokenInAddr  = ROUTES_DYNAMIC[`${tokenIn}-${tokenOut}`]?.[0]  ?? staticPath[0];
+        const tokenOutAddr = ROUTES_DYNAMIC[`${tokenIn}-${tokenOut}`]?.slice(-1)[0] ?? staticPath[staticPath.length - 1];
+
+        // Find the optimal path across all candidates
+        const { path: optPath, amtOutRaw, isOptimal } = await findBestPath(
+          tokenInAddr, tokenOutAddr, amtInRaw, staticPath
+        );
+
+        setBestPath(optPath);
+
+        // Build human-readable route label using token symbols
+        const addrToSym: Record<string, string> = {
+          [USDC.toLowerCase()]:   "USDC",
+          [EURC.toLowerCase()]:   "EURC",
+          [cirBTC.toLowerCase()]: "cirBTC",
+        };
+        // Add custom tokens to lookup
+        customTokens.forEach(t => { addrToSym[t.addr.toLowerCase()] = t.sym; });
+        const label = optPath.map(a => addrToSym[a.toLowerCase()] ?? a.slice(0,6)+"…").join(" → ");
+        setPathLabel(label);
+
+        if (!isOptimal || amtOutRaw === 0n) { setEstimate(null); return; }
+
+        const amtOut = Number(amtOutRaw) / 10 ** tokenOutDec;
+        const rate   = (amtOut / amtNum).toFixed(tokenOutDec === 8 ? 8 : 6);
+        // Price impact is only meaningful for same-unit single-hop swaps
+        const impact = (optPath.length === 2 && tokenInDec === tokenOutDec)
+          ? (Math.abs(1 - amtOut / amtNum) * 100).toFixed(2)
           : "N/A";
-        setEstimate({ amtOut:amtOut.toFixed(tokenOutDec===8?8:6), rate, impact });
+        setEstimate({ amtOut: amtOut.toFixed(tokenOutDec === 8 ? 8 : 6), rate, impact });
       } catch { setEstimate(null); }
       finally { setEstimating(false); }
-    },500);
+    }, 500);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   },[amountIn, tokenIn, tokenOut]);
 
@@ -457,18 +567,19 @@ export default function SwapPage() {
       const tokenInAddr = path[0];
 
       setStatus(`Checking ${tokenIn} allowance…`);
-      const allowRaw:any = await rpcCall("eth_call",[{ to:tokenInAddr, data:encodeAllowance(wallet.address,ROUTER) },"latest"]);
-      const allowance = allowRaw&&allowRaw!=="0x" ? BigInt(allowRaw) : 0n;
+      const allowRaw = await rpcCall("eth_call",[{ to:tokenInAddr, data:encodeAllowance(wallet.address,ROUTER) },"latest"]);
+      const allowance = safeAllowance(allowRaw);
 
       if (allowance < amtInRaw) {
         setStatus(`Approve ${tokenIn} — confirm in wallet…`);
-        const approveTx:string = await eth.request({ method:"eth_sendTransaction", params:[{ from:wallet.address, to:tokenInAddr, data:encodeApprove(ROUTER,MAX_U256), gas:GAS_APPROVE }] });
+        // Approve a large but not unlimited amount — avoids MetaMask NFT withdrawal UI
+        const approveTx:string = await eth.request({ method:"eth_sendTransaction", params:[{ from:wallet.address, to:tokenInAddr, data:encodeApprove(ROUTER,makeLargeApproval(tokenInDec)), gas:GAS_APPROVE }] });
         setStatus("Waiting for approval…");
         if (!await waitTx(approveTx,90000)) throw new Error(`Approve failed. TX: ${approveTx}`);
         setStatus("Approved! Preparing swap…");
         await new Promise(r=>setTimeout(r,3000));
-        const newAllow:any = await rpcCall("eth_call",[{ to:tokenInAddr, data:encodeAllowance(wallet.address,ROUTER) },"latest"]);
-        if (!newAllow||BigInt(newAllow)<amtInRaw) throw new Error("Allowance not updated.");
+        const newAllow = await rpcCall("eth_call",[{ to:tokenInAddr, data:encodeAllowance(wallet.address,ROUTER) },"latest"]);
+        if (safeAllowance(newAllow) < amtInRaw) throw new Error("Allowance not updated after approval.");
       }
 
       setStatus(`Swapping — confirm in wallet…`);
@@ -507,7 +618,7 @@ export default function SwapPage() {
           {rate
             ? <p style={{ fontSize:12, color:"var(--text2)", margin:"2px 0 0", fontFamily:"var(--mono)" }}>1 {tokenIn} ≈ <strong style={{ color:"var(--text1)" }}>{rate.toFixed(4)}</strong> {tokenOut}</p>
             : isMultiHop
-              ? <p style={{ fontSize:12, color:"#a855f7", margin:"2px 0 0", fontFamily:"var(--mono)" }}>Route: {tokenIn} → USDC → {tokenOut}</p>
+              ? <p style={{ fontSize:12, color:"#a855f7", margin:"2px 0 0", fontFamily:"var(--mono)" }}>Route: {pathLabel || `${tokenIn} → USDC → ${tokenOut}`}</p>
               : null
           }
         </div>
@@ -655,7 +766,7 @@ export default function SwapPage() {
                   <span>1 {tokenIn} = {estimate.rate} {tokenOut}</span>
                   <span style={{ color:impactColor(estimate.impact) }}>Impact: {estimate.impact}%</span>
                 </div>
-                {isMultiHop && <div style={{ fontSize:10, color:"#a855f7", marginTop:2 }}>Route: {tokenIn} → USDC → {tokenOut}</div>}
+                {isMultiHop && <div style={{ fontSize:10, color:"#a855f7", marginTop:2 }}>Route: {pathLabel || `${tokenIn} → USDC → ${tokenOut}`}</div>}
               </div>
             )}
             {estimating && amtNum>0 && (

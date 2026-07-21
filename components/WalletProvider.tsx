@@ -130,6 +130,30 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   function finish(address:string, chainId:number, walletType:string) {
     setWallet(p => ({ ...p, connected:true, address, chainId, walletType }));
     loadBal(address);
+    // Register Arc tokens as ERC-20 with MetaMask so the wallet
+    // does not misidentify approve() calls as NFT withdrawal requests.
+    registerArcTokensWithWallet().catch(() => {});
+  }
+
+  async function registerArcTokensWithWallet() {
+    // Only register once per browser session — avoid repeated MetaMask popups
+    const LS_KEY = "matrix_arc_tokens_registered";
+    if (localStorage.getItem(LS_KEY) === "1") return;
+    const eth = (window as any).ethereum;
+    if (!eth?.request) return;
+    const tokens = [
+      { symbol: "USDC",   address: "0x3600000000000000000000000000000000000000", decimals: 6  },
+      { symbol: "EURC",   address: "0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a", decimals: 6  },
+      { symbol: "cirBTC", address: "0xf0C4a4CE82A5746AbAAd9425360Ab04fbBA432BF", decimals: 8  },
+    ];
+    await Promise.allSettled(tokens.map(t =>
+      eth.request({
+        method: "wallet_watchAsset",
+        params: { type: "ERC20", options: { address: t.address, symbol: t.symbol, decimals: t.decimals } },
+      })
+    ));
+    // Mark as registered so we never call wallet_watchAsset again in this browser
+    localStorage.setItem(LS_KEY, "1");
   }
 
   const connect = useCallback(async (type:"MetaMask"|"Rabby") => {
