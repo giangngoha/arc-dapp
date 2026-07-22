@@ -38,7 +38,7 @@ export async function registerTokenWithMetaMask(
   image?: string,
 ): Promise<void> {
   try {
-    const eth = (window as any).ethereum;
+    const eth = typeof window !== "undefined" ? (window as any).ethereum : null;
     if (!eth) return;
     await eth.request({
       method: "wallet_watchAsset",
