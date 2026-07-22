@@ -119,7 +119,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   }, [wallet.address, loadBal]);
 
   useEffect(() => {
-    const eth = (window as any).ethereum;
+    const eth = typeof window !== "undefined" ? (window as any).ethereum : null;
     if (!eth) return;
     eth.request({method:"eth_accounts"}).then((accs:string[]) => {
       if (accs?.length) eth.request({method:"eth_chainId"}).then((h:string)=>finish(accs[0],parseInt(h,16),eth.isRabby?"Rabby":"MetaMask"));
@@ -139,25 +139,26 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     // Only register once per browser session — avoid repeated MetaMask popups
     const LS_KEY = "matrix_arc_tokens_registered";
     if (localStorage.getItem(LS_KEY) === "1") return;
-    const eth = (window as any).ethereum;
+    const eth = typeof window !== "undefined" ? (window as any).ethereum : null;
     if (!eth?.request) return;
     const tokens = [
       { symbol: "USDC",   address: "0x3600000000000000000000000000000000000000", decimals: 6  },
       { symbol: "EURC",   address: "0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a", decimals: 6  },
       { symbol: "cirBTC", address: "0xf0C4a4CE82A5746AbAAd9425360Ab04fbBA432BF", decimals: 8  },
     ];
+    // Mark BEFORE calling — so reconnects never re-trigger the popup
+    // regardless of whether user clicks Add or Cancel.
+    localStorage.setItem(LS_KEY, "1");
     await Promise.allSettled(tokens.map(t =>
       eth.request({
         method: "wallet_watchAsset",
         params: { type: "ERC20", options: { address: t.address, symbol: t.symbol, decimals: t.decimals } },
       })
     ));
-    // Mark as registered so we never call wallet_watchAsset again in this browser
-    localStorage.setItem(LS_KEY, "1");
   }
 
   const connect = useCallback(async (type:"MetaMask"|"Rabby") => {
-    const eth = (window as any).ethereum;
+    const eth = typeof window !== "undefined" ? (window as any).ethereum : null;
     if (!eth) throw new Error(`${type} not detected.`);
     let provider = eth;
     if (eth.providers?.length>1) provider = type==="Rabby" ? (eth.providers.find((p:any)=>p.isRabby)??eth) : (eth.providers.find((p:any)=>p.isMetaMask&&!p.isRabby)??eth);
