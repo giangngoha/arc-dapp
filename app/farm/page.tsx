@@ -182,7 +182,7 @@ async function waitTx(hash: string, maxMs = 90000): Promise<boolean> {
 
 // Ensure wallet is on Arc Testnet before sending transactions
 async function ensureArcChain(): Promise<void> {
-  const eth = (window as any).ethereum;
+  const eth = typeof window !== "undefined" ? (window as any).ethereum : null;
   const cur: string = await eth.request({ method: "eth_chainId" });
   if (cur.toLowerCase() !== ARC_CHAIN_HEX.toLowerCase()) {
     await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: ARC_CHAIN_HEX }] });
@@ -239,7 +239,7 @@ function PoolCard({
   const [unstakeInput, setUnstakeInput] = useState("");
   const [loading,      setLoading]      = useState<"stake"|"unstake"|"claim"|null>(null);
 
-  const eth = (window as any).ethereum;
+  const eth = typeof window !== "undefined" ? (window as any).ethereum : null;
   const lpBal   = state ? Number(state.userLpBal)   / 1e18 : 0;
   const staked  = state ? Number(state.userStaked)  / 1e18 : 0;
   const pending = state ? Number(state.pendingReward) / 1e6 : 0;
@@ -636,7 +636,7 @@ export default function FarmPage() {
     const def = POOL_DEFS.find(d => d.pid === pid);
     if (!def) return;
     try {
-      const eth = (window as any).ethereum;
+      const eth = typeof window !== "undefined" ? (window as any).ethereum : null;
       const addr = wallet.address;
       const balData = encodeBalanceOf(addr);
 
